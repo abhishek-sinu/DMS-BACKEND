@@ -40,6 +40,7 @@ import reportRouter from './routes/report.js';
 import engagementRouter from './routes/engagement.js';
 import swaggerRouter from './routes/swagger.js';
 import emailRouter from './routes/email.js';
+import cultivatorsRouter from './routes/cultivators.js';
 
 app.use('/api/donors', donorsRouter);
 app.use('/api/donors', familyMembersRouter);
@@ -54,6 +55,7 @@ app.use('/api/report', reportRouter);
 app.use('/api/engagement', engagementRouter);
 app.use('/api/docs', swaggerRouter);
 app.use('/api/email', emailRouter);
+app.use('/api/cultivators', cultivatorsRouter);
 
 // Secure sensitive routes
 app.use('/api/donors', authenticateToken, authorizeRoles(1), donorsRouter);

@@ -30,7 +30,12 @@ import { body, validationResult } from 'express-validator';
 router.get('/', (req, res) => {
     (async () => {
         try {
-            const [results] = await db.query('SELECT * FROM donors');
+            const [results] = await db.query(`
+                SELECT donors.*, cultivators.name AS cultivator_name
+                FROM donors
+                LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+            `);
+            console.log('Donor list API results:', results);
             res.json(results);
         } catch (err) {
             res.status(500).json({ error: err });
@@ -100,7 +105,14 @@ router.post('/',
         body('email').isEmail().optional({ nullable: true }).withMessage('Invalid email'),
         body('phone').isString().optional({ nullable: true }),
         body('date_of_birth').optional({ nullable: true }).isISO8601().withMessage('Invalid date'),
-        body('anniversary_date').optional({ nullable: true }).isISO8601().withMessage('Invalid date')
+        body('anniversary_date').optional({ nullable: true }).isISO8601().withMessage('Invalid date'),
+        body('pan_card').optional({ nullable: true }).isString(),
+        body('address_house').optional({ nullable: true }).isString(),
+        body('address_city').optional({ nullable: true }).isString(),
+        body('address_state').optional({ nullable: true }).isString(),
+        body('address_pin').optional({ nullable: true }).isString(),
+        body('cultivator').optional({ nullable: true }).isString(),
+        body('last_gift_details').optional({ nullable: true }).isString()
     ],
     (req, res) => {
         const errors = validationResult(req);
@@ -159,15 +171,18 @@ router.post('/',
  */
 router.put('/:id', async (req, res) => {
     try {
+        const donor = req.body;
+        // Sanitize date fields
+        donor.anniversary_date = sanitizeDateField(donor.anniversary_date);
+        donor.date_of_birth = sanitizeDateField(donor.date_of_birth);
         // Exclude family_members from donor update
-        const donorData = { ...req.body };
-        const familyMembers = donorData.family_members || [];
-        delete donorData.family_members;
+        const familyMembers = donor.family_members || [];
+        delete donor.family_members;
         // Convert all date fields to YYYY-MM-DD if present
         const dateFields = ['date_of_birth', 'anniversary_date', 'created_at', 'updated_at'];
         dateFields.forEach(field => {
-            if (donorData[field]) {
-                donorData[field] = donorData[field].split('T')[0];
+            if (donor[field]) {
+                donor[field] = donor[field].split('T')[0];
             }
         });
         // Also convert family member date_of_birth
@@ -178,20 +193,27 @@ router.put('/:id', async (req, res) => {
                 }
             });
         }
-        await db.query('UPDATE donors SET ? WHERE id = ?', [donorData, req.params.id]);
-        // Upsert family members if provided
-        if (Array.isArray(familyMembers) && familyMembers.length > 0) {
-            for (const member of familyMembers) {
-                if (member.id) {
-                    // Update existing family member
-                    await db.query('UPDATE donor_family_members SET ? WHERE id = ? AND donor_id = ?', [{ name: member.name, relation: member.relation, date_of_birth: member.date_of_birth }, member.id, req.params.id]);
-                } else {
-                    // Insert new family member
-                    await db.query('INSERT INTO donor_family_members SET ?', { donor_id: req.params.id, name: member.name, relation: member.relation, date_of_birth: member.date_of_birth });
-                }
-            }
-        }
-        res.json({ message: 'Donor updated' });
+        await db.query(
+            `UPDATE donors SET name=?, email=?, phone=?, address=?, address_house=?, address_city=?, address_state=?, address_pin=?, pan_card=?, notes=?, last_gift_details=?, date_of_birth=?, anniversary_date=?, cultivator_id=? WHERE id=?`,
+            [
+                donor.name,
+                donor.email,
+                donor.phone,
+                donor.address,
+                donor.address_house,
+                donor.address_city,
+                donor.address_state,
+                donor.address_pin,
+                donor.pan_card,
+                donor.notes,
+                donor.last_gift_details,
+                donor.date_of_birth,
+                donor.anniversary_date,
+                donor.cultivator_id,
+                donor.id
+            ]
+        );
+        res.json({ success: true });
         // Audit log
         if (req.user && req.user.id) {
             await db.query('INSERT INTO audit_logs SET ?', {
@@ -204,6 +226,12 @@ router.put('/:id', async (req, res) => {
         res.status(500).json({ error: err.message || err });
     }
 });
+
+// Helper to sanitize empty date fields
+function sanitizeDateField(value) {
+    if (!value || value === '') return null;
+    return value;
+}
 
 // Delete donor
 /**
