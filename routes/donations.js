@@ -91,20 +91,29 @@ router.get('/:id', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Donation'
  */
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
     const donation = req.body;
-    db.query('INSERT INTO donations SET ?', donation, (err, result) => {
-        if (err) return res.status(500).json({ error: err });
-        res.json({ id: result.insertId, ...donation });
+    // Fix transaction_date to YYYY-MM-DD if present
+    if (donation.transaction_date) {
+        const d = new Date(donation.transaction_date);
+        if (!isNaN(d)) {
+            donation.transaction_date = d.toISOString().slice(0, 10);
+        }
+    }
+    try {
+        const [result] = await db.query('INSERT INTO donations SET ?', donation);
         // Audit log
         if (req.user && req.user.id) {
-            db.query('INSERT INTO audit_logs SET ?', {
+            await db.query('INSERT INTO audit_logs SET ?', {
                 user_id: req.user.id,
                 action: 'create_donation',
                 details: JSON.stringify({ donation_id: result.insertId, donation }),
             });
         }
-    });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message || err });
+    }
 });
 
 // Update donation
@@ -139,18 +148,41 @@ router.post('/', (req, res) => {
  *                   type: string
  */
 router.put('/:id', (req, res) => {
-    db.query('UPDATE donations SET ? WHERE id = ?', [req.body, req.params.id], (err) => {
-        if (err) return res.status(500).json({ error: err });
-        res.json({ message: 'Donation updated' });
-        // Audit log
-        if (req.user && req.user.id) {
-            db.query('INSERT INTO audit_logs SET ?', {
-                user_id: req.user.id,
-                action: 'update_donation',
-                details: JSON.stringify({ donation_id: req.params.id, donation: req.body }),
-            });
+    (async () => {
+        try {
+            console.log('--- Donation Update API called ---');
+            console.log('Request params:', req.params);
+            console.log('Request body:', req.body);
+            const donation = req.body;
+            // Fix transaction_date to YYYY-MM-DD if present
+            if (donation.transaction_date) {
+                const d = new Date(donation.transaction_date);
+                if (!isNaN(d)) {
+                    donation.transaction_date = d.toISOString().slice(0, 10);
+                }
+            }
+            console.log('date:',donation.transaction_date);
+            const [result] = await db.query('UPDATE donations SET ? WHERE id = ?', [donation, req.params.id]);
+            console.log('Donation update result:', result);
+            // Audit log (awaited, like donor update)
+            if (req.user && req.user.id) {
+                try {
+                    await db.query('INSERT INTO audit_logs SET ?', {
+                        user_id: req.user.id,
+                        action: 'update_donation',
+                        details: JSON.stringify({ donation_id: req.params.id, donation }),
+                    });
+                } catch (auditErr) {
+                    console.error('Audit log error:', auditErr);
+                }
+            }
+            res.json({ success: true });
+            console.log('--- Donation update response sent ---');
+        } catch (e) {
+            console.error('Unexpected error in update donation:', e);
+            res.status(500).json({ error: 'Unexpected error' });
         }
-    });
+    })();
 });
 
 // Delete donation
@@ -178,19 +210,24 @@ router.put('/:id', (req, res) => {
  *                 message:
  *                   type: string
  */
-router.delete('/:id', (req, res) => {
-    db.query('DELETE FROM donations WHERE id = ?', [req.params.id], (err) => {
-        if (err) return res.status(500).json({ error: err });
-        res.json({ message: 'Donation deleted' });
+router.delete('/:id', async (req, res) => {
+    try {
+        console.log('--- Entry: DELETE /api/donations/' + req.params.id + ' ---');
+        await db.query('DELETE FROM donations WHERE id = ?', [req.params.id]);
         // Audit log
         if (req.user && req.user.id) {
-            db.query('INSERT INTO audit_logs SET ?', {
+            await db.query('INSERT INTO audit_logs SET ?', {
                 user_id: req.user.id,
                 action: 'delete_donation',
                 details: JSON.stringify({ donation_id: req.params.id }),
             });
         }
-    });
+        res.json({ success: true });
+        console.log('--- Exit: DELETE /api/donations/' + req.params.id + ' (success) ---');
+    } catch (err) {
+        console.error('--- Exit: DELETE /api/donations/' + req.params.id + ' (error):', err);
+        res.status(500).json({ error: err.message || err });
+    }
 });
 
 export default router;
