@@ -114,17 +114,24 @@ router.post('/',
         body('cultivator').optional({ nullable: true }).isString(),
         body('last_gift_details').optional({ nullable: true }).isString()
     ],
-    (req, res) => {
+    async (req, res) => {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
         const donor = req.body;
-        db.query('INSERT INTO donors SET ?', donor, (err, result) => {
-            if (err) {
-                console.error('DB error:', err);
-                return res.status(500).json({ error: 'Database error', details: err });
+        try {
+            // Check for duplicate donor (name + phone)
+            if (donor.name && donor.phone) {
+                const [existing] = await db.query(
+                    'SELECT id FROM donors WHERE name = ? AND phone = ? LIMIT 1',
+                    [donor.name, donor.phone]
+                );
+                if (existing.length > 0) {
+                    return res.status(409).json({ error: 'A donor with this name and phone number already exists.' });
+                }
             }
+            const [result] = await db.query('INSERT INTO donors SET ?', donor);
             res.json({ id: result.insertId, ...donor });
             // Audit log
             if (req.user && req.user.id) {
@@ -134,7 +141,13 @@ router.post('/',
                     details: JSON.stringify({ donor_id: result.insertId, donor }),
                 });
             }
-        });
+        } catch (err) {
+            console.error('DB error:', err);
+            if (err.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({ error: 'A donor with this name and phone number already exists.' });
+            }
+            return res.status(500).json({ error: 'Database error', details: err.message || err });
+        }
     }
 );
 
@@ -223,6 +236,9 @@ router.put('/:id', async (req, res) => {
             });
         }
     } catch (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'A donor with this name and phone number already exists.' });
+        }
         res.status(500).json({ error: err.message || err });
     }
 });
@@ -276,6 +292,93 @@ router.delete('/:id', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message || err });
     }
+});
+
+// Bulk import donors from Excel
+router.post('/import', async (req, res) => {
+    console.log('--- Entry: POST /api/donors/import ---');
+    const donors = req.body.donors;
+    if (!Array.isArray(donors)) {
+        return res.status(400).json({ error: 'donors must be an array' });
+    }
+
+    // Get valid column names from donors table
+    let validColumns = [];
+    try {
+        const [columns] = await db.query('SHOW COLUMNS FROM donors');
+        validColumns = columns.map(c => c.Field);
+    } catch (err) {
+        console.error('Could not fetch donor columns:', err);
+    }
+
+    const results = [];
+    for (let i = 0; i < donors.length; i++) {
+        const raw = donors[i];
+        try {
+            const donor = {};
+            for (const [key, val] of Object.entries(raw)) {
+                if (val === null || val === undefined || val === '') continue;
+                // Handle cultivator name -> cultivator_id lookup
+                if (key === 'cultivator' && validColumns.includes('cultivator_id')) {
+                    try {
+                        const [rows] = await db.query('SELECT id FROM cultivators WHERE name = ? LIMIT 1', [val]);
+                        if (rows.length > 0) donor.cultivator_id = rows[0].id;
+                    } catch (e) { /* skip */ }
+                    continue;
+                }
+                // Only include fields that exist in the table
+                if (validColumns.length === 0 || validColumns.includes(key)) {
+                    donor[key] = val;
+                }
+            }
+            // Fix date fields to YYYY-MM-DD if present
+            if (donor.date_of_birth) {
+                const d = new Date(donor.date_of_birth);
+                if (!isNaN(d)) donor.date_of_birth = d.toISOString().slice(0, 10);
+            }
+            if (donor.anniversary_date) {
+                const d = new Date(donor.anniversary_date);
+                if (!isNaN(d)) donor.anniversary_date = d.toISOString().slice(0, 10);
+            }
+            // Remove id if present
+            delete donor.id;
+            console.log(`Row ${i + 1} data:`, JSON.stringify(donor));
+            // Check for duplicate (name + phone)
+            if (donor.name && donor.phone) {
+                const [existing] = await db.query(
+                    'SELECT id FROM donors WHERE name = ? AND phone = ? LIMIT 1',
+                    [donor.name, donor.phone]
+                );
+                if (existing.length > 0) {
+                    results.push({ row: i + 1, status: 'skipped', reason: `Duplicate: donor "${donor.name}" with phone "${donor.phone}" already exists` });
+                    console.log(`Row ${i + 1}: skipped (duplicate)`);
+                    continue;
+                }
+            }
+            const [result] = await db.query('INSERT INTO donors SET ?', donor);
+            results.push({ row: i + 1, status: 'inserted' });
+            console.log(`Row ${i + 1}: inserted`);
+        } catch (err) {
+            results.push({ row: i + 1, status: 'failed', reason: err.message || err });
+            console.error(`Row ${i + 1}: failed - ${err.message || err}`);
+        }
+    }
+    const failed = results.filter(r => r.status === 'failed');
+    const inserted = results.filter(r => r.status === 'inserted');
+    const skipped = results.filter(r => r.status === 'skipped');
+    let message = '';
+    if (inserted.length === donors.length) {
+        message = 'All rows inserted successfully.';
+    } else if (inserted.length === 0 && skipped.length === 0) {
+        message = 'No rows inserted.';
+    } else {
+        const parts = [`${inserted.length} inserted`];
+        if (skipped.length > 0) parts.push(`${skipped.length} skipped (duplicates)`);
+        if (failed.length > 0) parts.push(`${failed.length} failed`);
+        message = parts.join(', ') + '.';
+    }
+    console.log(`--- Import summary: ${message} ---`);
+    res.json({ message, inserted: inserted.length, failed: failed.length, skipped: skipped.length, details: results });
 });
 
 export default router;

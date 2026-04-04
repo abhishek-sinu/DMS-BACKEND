@@ -41,6 +41,7 @@ import engagementRouter from './routes/engagement.js';
 import swaggerRouter from './routes/swagger.js';
 import emailRouter from './routes/email.js';
 import cultivatorsRouter from './routes/cultivators.js';
+import dashboardRouter from './routes/dashboard.js';
 
 app.use('/api/donors', donorsRouter);
 app.use('/api/donors', familyMembersRouter);
@@ -53,6 +54,7 @@ app.use('/api/communication-logs', communicationLogsRouter);
 app.use('/api/import', importRouter);
 app.use('/api/report', reportRouter);
 app.use('/api/engagement', engagementRouter);
+app.use('/api/dashboard', dashboardRouter);
 app.use('/api/docs', swaggerRouter);
 app.use('/api/email', emailRouter);
 app.use('/api/cultivators', cultivatorsRouter);
