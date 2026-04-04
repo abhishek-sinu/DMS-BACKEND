@@ -63,7 +63,7 @@ router.post('/login', async (req, res) => {
             console.warn('[LOGIN] Invalid credentials: password mismatch');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
-        const token = jwt.sign({ id: user.id, role_id: user.role_id }, JWT_SECRET, { expiresIn: '1d' });
+        const token = jwt.sign({ id: user.id, username: user.username, role_id: user.role_id }, JWT_SECRET, { expiresIn: '1d' });
         console.log('[LOGIN] Token generated:', token);
         res.json({ success: true, token, user: { id: user.id, username: user.username, role_id: user.role_id } });
         console.log('[LOGIN] Response sent:', { id: user.id, username: user.username, role_id: user.role_id });

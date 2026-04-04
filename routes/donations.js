@@ -230,36 +230,53 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// Bulk import donations from Excel
+router.post('/import', async (req, res) => {
+    console.log('--- Entry: POST /api/donations/import ---');
+    const donations = req.body.donations;
+    if (!Array.isArray(donations)) {
+        console.error('Import failed: donations must be an array');
+        return res.status(400).json({ error: 'donations must be an array' });
+    }
+    const results = [];
+    for (let i = 0; i < donations.length; i++) {
+        const donation = donations[i];
+        try {
+            // Fix transaction_date to YYYY-MM-DD if present
+            if (donation.transaction_date) {
+                const d = new Date(donation.transaction_date);
+                if (!isNaN(d)) {
+                    donation.transaction_date = d.toISOString().slice(0, 10);
+                }
+            }
+            await db.query('INSERT INTO donations SET ?', donation);
+            results.push({ row: i + 1, status: 'inserted' });
+            console.log(`Row ${i + 1}: inserted`);
+        } catch (err) {
+            results.push({ row: i + 1, status: 'failed', reason: err.message || err });
+            console.error(`Row ${i + 1}: failed - ${err.message || err}`);
+        }
+    }
+    // Summary
+    const failed = results.filter(r => r.status === 'failed');
+    const inserted = results.filter(r => r.status === 'inserted');
+    let message = '';
+    if (inserted.length === donations.length) {
+        message = 'All rows inserted successfully.';
+    } else if (inserted.length === 0) {
+        message = 'No rows inserted.';
+    } else {
+        message = `Partial insert: ${inserted.length} inserted, ${failed.length} failed.`;
+    }
+    console.log(`--- Import summary: ${message} ---`);
+    res.json({
+        message,
+        inserted: inserted.length,
+        failed: failed.length,
+        details: results
+    });
+});
+
+
+
 export default router;
-/**
- * @swagger
- * components:
- *   schemas:
- *     Donation:
- *       type: object
- *       properties:
- *         id:
- *           type: integer
- *         donor_id:
- *           type: integer
- *         amount:
- *           type: number
- *           format: float
- *         donation_date:
- *           type: string
- *           format: date
- *         donation_type:
- *           type: string
- *         purpose:
- *           type: string
- *         receipt_number:
- *           type: string
- *         payment_details:
- *           type: string
- *         created_at:
- *           type: string
- *           format: date-time
- *         updated_at:
- *           type: string
- *           format: date-time
- */
