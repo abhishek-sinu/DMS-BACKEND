@@ -6,7 +6,7 @@
 	```sh
 	cd DMS-BACKEND
 	```
-2. Install dependencies:
+2. Install npm from website & dependencies:
 	```sh
 	npm install
 	```
