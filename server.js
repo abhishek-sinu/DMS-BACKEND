@@ -42,6 +42,9 @@ import swaggerRouter from './routes/swagger.js';
 import emailRouter from './routes/email.js';
 import cultivatorsRouter from './routes/cultivators.js';
 import dashboardRouter from './routes/dashboard.js';
+import giftsRouter from './routes/gifts.js';
+
+
 
 app.use('/api/donors', donorsRouter);
 app.use('/api/donors', familyMembersRouter);
@@ -58,6 +61,9 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/docs', swaggerRouter);
 app.use('/api/email', emailRouter);
 app.use('/api/cultivators', cultivatorsRouter);
+app.use('/api/gifts', giftsRouter);
+
+
 
 // Secure sensitive routes
 app.use('/api/donors', authenticateToken, authorizeRoles(1), donorsRouter);
@@ -69,6 +75,7 @@ app.use('/api/communication-logs', authenticateToken, authorizeRoles(1), communi
 app.use('/api/import', authenticateToken, authorizeRoles(1), importRouter);
 app.use('/api/report', authenticateToken, authorizeRoles(1), reportRouter);
 app.use('/api/engagement', authenticateToken, authorizeRoles(1,2), engagementRouter);
+app.use('/api/gifts', authenticateToken, authorizeRoles(1), giftsRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
