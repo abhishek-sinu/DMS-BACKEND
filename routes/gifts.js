@@ -250,6 +250,31 @@ const validateGift = [
         .isISO8601().withMessage('Invalid datetime format'),
 ];
 
+// Edit a gift
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { phone, gift_name, description, value, date_given, created_at } = req.body;
+
+  if (!phone) return res.status(400).json({ error: 'Phone is required' });
+  if (!gift_name) return res.status(400).json({ error: 'Gift name is required' });
+  if (!value) return res.status(400).json({ error: 'Value is required' });
+  if (!date_given) return res.status(400).json({ error: 'Date given is required' });
+
+  try {
+    await db.query(
+      `UPDATE gifts 
+       SET phone = ?, gift_name = ?, description = ?, value = ?, date_given = ?, created_at = ?
+       WHERE id = ?`,
+      [phone, gift_name, description, value, date_given, created_at, id]
+    );
+
+    res.json({ id, phone, gift_name, description, value, date_given, created_at });
+
+  } catch (err) {
+    res.status(500).json({ error: err });
+  }
+});
+
 // ✅ POST API
 router.post('/', validateGift, async (req, res) => {
     try {
