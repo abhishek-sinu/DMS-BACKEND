@@ -131,7 +131,7 @@ const validatePhone = [
         .isLength({ min: 10, max: 15 }).withMessage('Invalid phone number'),
 ];
 
-// ✅ GET API
+// ✅ GET API 
 router.get('/by-phone', validatePhone, async (req, res) => {
     try {
         // 🔹 Validate input
