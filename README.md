@@ -31,6 +31,20 @@
 	npm start
 	```
 4. The backend will run on the port specified in your configuration (5000). _Append_ 'api/donors' in url to see donors data from your local database.
+
+5. To fill dummy data in gifts table - 
+INSERT INTO gifts (phone, gift_name, description, value, date_given, created_at)
+VALUES
+('9876543210', 'Bhagavad Gita', 'Spiritual book', 250.00, '2026-01-10', NOW()),
+('9123456780', 'Tulsi Mala', 'Sacred chanting beads', 150.00, '2026-01-12', NOW()),
+('9988776655', 'Krishna Idol', 'Small marble idol', 1200.00, '2026-01-15', NOW()),
+('9012345678', 'Incense Pack', 'Agarbatti set', 100.00, '2026-01-18', NOW()),
+('9090909090', 'Bhajan CD', 'Devotional songs collection', 200.00, '2026-01-20', NOW()),
+('8888888888', 'Spiritual Calendar', 'ISKCON calendar', 80.00, '2026-01-22', NOW()),
+('9777777777', 'Prasadam Box', 'Sanctified food pack', 300.00, '2026-01-25', NOW()),
+('9666666666', 'Chanting Counter', 'Digital tally counter', 180.00, '2026-01-27', NOW()),
+('9555555555', 'Wall Poster', 'Radha Krishna poster', 120.00, '2026-01-29', NOW()),
+('9444444444', 'Donation Receipt Book', 'Receipt booklet', 500.00, '2026-02-01', NOW());
 ---
 
 
