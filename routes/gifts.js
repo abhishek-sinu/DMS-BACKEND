@@ -54,7 +54,7 @@ router.get('/', validateQuery, async (req, res) => {
 
         // 🔹 Pagination params
         const page = Number(req.query.page) || 1;
-        const limit = Number(req.query.limit) || 10;
+        const limit = Number(req.query.limit) || 100000;
         const offset = (page - 1) * limit;
 
         // 🔹 Main query (ALL columns)
@@ -67,14 +67,13 @@ router.get('/', validateQuery, async (req, res) => {
                 description,
                 value,
                 date_given,
-                created_at
-            FROM gifts
+                created_at 
+            FROM gifts 
             ORDER BY id DESC
-            LIMIT ? OFFSET ?
-            `,
-            [limit, offset]
+            `
         );
-
+            // LIMIT ? OFFSET ?
+            // [limit, offset]
         // 🔹 Count query
         const [[{ total }]] = await db.query(
             `SELECT COUNT(*) as total FROM gifts`
