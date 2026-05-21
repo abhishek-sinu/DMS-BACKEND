@@ -4,8 +4,6 @@ import db from '../db.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
-
 /**
  * @swagger
  * tags:
@@ -63,6 +61,7 @@ router.post('/login', async (req, res) => {
             console.warn('[LOGIN] Invalid credentials: password mismatch');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
+        const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
         const token = jwt.sign({ id: user.id, username: user.username, role_id: user.role_id }, JWT_SECRET, { expiresIn: '1d' });
         console.log('[LOGIN] Token generated:', token);
         res.json({ success: true, token, user: { id: user.id, username: user.username, role_id: user.role_id } });

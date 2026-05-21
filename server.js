@@ -1,10 +1,14 @@
 // Backend configuration for ISKCON Donation Management System
 // Node.js + Express + MySQL
 
+import 'dotenv/config';
 import express from 'express';
 import mysql from 'mysql2';
-
 import cors from 'cors';
+import { authenticateToken, authorizeRoles } from './middleware/security.js';
+
+console.log('JWT_SECRET in use:', process.env.JWT_SECRET);
+
 const app = express();
 
 app.use(express.json());
@@ -14,10 +18,6 @@ app.use(cors({
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-
-import dotenv from 'dotenv';
-dotenv.config();
-import { authenticateToken, authorizeRoles } from './middleware/security.js';
 
 // Basic health check
 app.get('/api/health', (req, res) => {
@@ -61,7 +61,6 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/docs', swaggerRouter);
 app.use('/api/email', emailRouter);
 app.use('/api/cultivators', cultivatorsRouter);
-app.use('/api/gifts', giftsRouter);
 
 
 
@@ -75,7 +74,7 @@ app.use('/api/communication-logs', authenticateToken, authorizeRoles(1), communi
 app.use('/api/import', authenticateToken, authorizeRoles(1), importRouter);
 app.use('/api/report', authenticateToken, authorizeRoles(1), reportRouter);
 app.use('/api/engagement', authenticateToken, authorizeRoles(1,2), engagementRouter);
-app.use('/api/gifts', authenticateToken, authorizeRoles(1), giftsRouter);
+app.use('/api/gifts', authenticateToken, authorizeRoles(1,2), giftsRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

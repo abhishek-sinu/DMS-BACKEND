@@ -26,10 +26,20 @@ import db from '../db.js';
  *                 $ref: '#/components/schemas/Donation'
  */
 // Get all donations
+// Get all donations with donor and cultivator info
 router.get('/', (req, res) => {
     (async () => {
         try {
-            const [results] = await db.query('SELECT * FROM donations');
+        const [results] = await db.query(`
+                SELECT 
+                    donations.*,
+                    COALESCE(donors.name, donations.donor_name) AS donor_name,
+                    COALESCE(donors.phone, donations.phone_number) AS donor_phone,
+                    cultivators.name AS cultivator_name
+                FROM donations
+                LEFT JOIN donors ON donations.phone_number = donors.phone
+                LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+            `);
             res.json(results);
         } catch (err) {
             res.status(500).json({ error: err });

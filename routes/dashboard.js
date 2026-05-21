@@ -16,12 +16,24 @@ router.get('/stats', async (req, res) => {
         // Total cultivators
         const [[{ totalCultivators }]] = await db.query('SELECT COUNT(*) AS totalCultivators FROM cultivators');
 
-        // Upcoming birthdays (next 30 days)
+        // Upcoming birthdays (next 30 days): donors + donor family members
         const [[{ upcomingBirthdays }]] = await db.query(`
-            SELECT COUNT(*) AS upcomingBirthdays FROM donors
-            WHERE date_of_birth IS NOT NULL
-            AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth)))
-                BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
+            SELECT COUNT(*) AS upcomingBirthdays
+            FROM (
+                SELECT d.id
+                FROM donors d
+                WHERE d.date_of_birth IS NOT NULL
+                AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(d.date_of_birth), '-', DAY(d.date_of_birth)))
+                    BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
+
+                UNION ALL
+
+                SELECT fm.id
+                FROM donor_family_members fm
+                WHERE fm.date_of_birth IS NOT NULL
+                AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(fm.date_of_birth), '-', DAY(fm.date_of_birth)))
+                    BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
+            ) AS birthday_rows
         `);
 
         // Upcoming anniversaries (next 30 days)
@@ -69,12 +81,44 @@ router.get('/stats', async (req, res) => {
 router.get('/upcoming-birthdays', async (req, res) => {
     try {
         const [results] = await db.query(`
-            SELECT name, phone, email, date_of_birth
-            FROM donors
-            WHERE date_of_birth IS NOT NULL
-            AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth)))
-                BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
-            ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth))) ASC
+            SELECT *
+            FROM (
+                SELECT
+                    'donor' AS person_type,
+                    d.id AS donor_id,
+                    NULL AS family_member_id,
+                    d.name AS donor_name,
+                    d.name AS person_name,
+                    NULL AS relationship,
+                    d.phone,
+                    d.email,
+                    d.date_of_birth AS birthday
+                FROM donors d
+                WHERE d.date_of_birth IS NOT NULL
+                AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(d.date_of_birth), '-', DAY(d.date_of_birth)))
+                    BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
+
+                UNION ALL
+
+                SELECT
+                    'family' AS person_type,
+                    d.id AS donor_id,
+                    fm.id AS family_member_id,
+                    d.name AS donor_name,
+                    fm.name AS person_name,
+                    fm.relation AS relationship,
+                    d.phone,
+                    d.email,
+                    fm.date_of_birth AS birthday
+                FROM donor_family_members fm
+                INNER JOIN donors d ON d.id = fm.donor_id
+                WHERE fm.date_of_birth IS NOT NULL
+                AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(fm.date_of_birth), '-', DAY(fm.date_of_birth)))
+                    BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
+            ) AS upcoming
+            ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(upcoming.birthday), '-', DAY(upcoming.birthday))) ASC,
+                     upcoming.donor_name ASC,
+                     upcoming.person_name ASC
         `);
         res.json(results);
     } catch (err) {
@@ -86,7 +130,7 @@ router.get('/upcoming-birthdays', async (req, res) => {
 router.get('/upcoming-anniversaries', async (req, res) => {
     try {
         const [results] = await db.query(`
-            SELECT name, phone, email, anniversary_date
+            SELECT id AS donor_id, name, phone, email, anniversary_date
             FROM donors
             WHERE anniversary_date IS NOT NULL
             AND DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(anniversary_date), '-', DAY(anniversary_date)))

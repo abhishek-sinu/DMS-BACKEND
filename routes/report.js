@@ -4,6 +4,111 @@ import db from '../db.js';
 import XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 
+function normalizeMode(mode) {
+    return mode === 'aggregate' ? 'aggregate' : 'individual';
+}
+
+function buildDonationWhereClause(query) {
+    const conditions = [];
+    const params = [];
+
+    if (query.dateFrom) {
+        conditions.push('donations.transaction_date >= ?');
+        params.push(query.dateFrom);
+    }
+    if (query.dateTo) {
+        conditions.push('donations.transaction_date <= ?');
+        params.push(query.dateTo);
+    }
+    if (query.amountMin !== undefined && query.amountMin !== '') {
+        conditions.push('donations.amount >= ?');
+        params.push(Number(query.amountMin));
+    }
+    if (query.amountMax !== undefined && query.amountMax !== '') {
+        conditions.push('donations.amount <= ?');
+        params.push(Number(query.amountMax));
+    }
+    if (query.scheme) {
+        conditions.push('LOWER(donations.scheme_name) LIKE ?');
+        params.push(`%${String(query.scheme).toLowerCase()}%`);
+    }
+
+    const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    return { whereSql, params };
+}
+
+async function getReportRows(query) {
+    const mode = normalizeMode(query.mode);
+    const { whereSql, params } = buildDonationWhereClause(query);
+
+    if (mode === 'aggregate') {
+        const [rows] = await db.query(
+            `
+            SELECT
+                MIN(donations.id) AS id,
+                phone_group.donor_phone AS donor_phone,
+                COALESCE(MAX(donors.name), MAX(donations.donor_name)) AS donor_name,
+                MAX(cultivators.name) AS cultivator_name,
+                COUNT(*) AS donation_count,
+                SUM(donations.amount) AS amount,
+                MIN(donations.transaction_date) AS first_date,
+                MAX(donations.transaction_date) AS last_date,
+                GROUP_CONCAT(DISTINCT donations.scheme_name ORDER BY donations.scheme_name SEPARATOR ', ') AS scheme_names
+            FROM donations
+            JOIN (
+                SELECT id, COALESCE(NULLIF(phone_number, ''), CONCAT('NO_PHONE_', id)) AS donor_phone
+                FROM donations
+            ) AS phone_group ON phone_group.id = donations.id
+            LEFT JOIN donors ON donations.phone_number = donors.phone
+            LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+            ${whereSql}
+            GROUP BY phone_group.donor_phone
+            ORDER BY SUM(donations.amount) DESC
+            `,
+            params
+        );
+        return rows;
+    }
+
+    const [rows] = await db.query(
+        `
+        SELECT
+            donations.id,
+            donations.receipt_number,
+            COALESCE(donors.name, donations.donor_name) AS donor_name,
+            COALESCE(donors.phone, donations.phone_number) AS donor_phone,
+            donations.transaction_date,
+            donations.amount,
+            donations.scheme_name,
+            donations.mode_of_payment,
+            donations.instrument_number,
+            cultivators.name AS cultivator_name
+        FROM donations
+        LEFT JOIN donors ON donations.phone_number = donors.phone
+        LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+        ${whereSql}
+        ORDER BY donations.transaction_date DESC, donations.id DESC
+        `,
+        params
+    );
+
+    return rows;
+}
+
+function prettifyKey(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function normalizeDateFields(row) {
+    const normalized = { ...row };
+    Object.keys(normalized).forEach(key => {
+        if ((key.includes('date') || key === 'created_at') && normalized[key]) {
+            normalized[key] = new Date(normalized[key]).toLocaleDateString('en-IN');
+        }
+    });
+    return normalized;
+}
+
 /**
  * @swagger
  * tags:
@@ -29,19 +134,15 @@ import PDFDocument from 'pdfkit';
 // XLS export for donations
 router.get('/donations/xls', async (req, res) => {
     try {
-        const [results] = await db.query('SELECT * FROM donations');
-        // Remove id field from each row
-        const cleaned = results.map(({ id, ...rest }) => {
-            if (rest.transaction_date) rest.transaction_date = new Date(rest.transaction_date).toLocaleDateString('en-IN');
-            if (rest.donation_date) rest.donation_date = new Date(rest.donation_date).toLocaleDateString('en-IN');
-            if (rest.created_at) rest.created_at = new Date(rest.created_at).toLocaleDateString('en-IN');
-            return rest;
-        });
+        const mode = normalizeMode(req.query.mode);
+        const results = await getReportRows(req.query);
+        const cleaned = results.map(({ id, ...rest }) => normalizeDateFields(rest));
         const ws = XLSX.utils.json_to_sheet(cleaned);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Donations');
         const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-        res.setHeader('Content-Disposition', 'attachment; filename="donations.xlsx"');
+        const filename = mode === 'aggregate' ? 'donations_aggregate.xlsx' : 'donations.xlsx';
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.send(buffer);
     } catch (err) {
@@ -67,13 +168,15 @@ router.get('/donations/xls', async (req, res) => {
  */
 router.get('/donations/pdf', async (req, res) => {
     try {
-        const [results] = await db.query('SELECT * FROM donations');
+        const mode = normalizeMode(req.query.mode);
+        const results = await getReportRows(req.query);
         const doc = new PDFDocument({ margin: 40, size: 'A4', layout: 'landscape' });
-        res.setHeader('Content-Disposition', 'attachment; filename="donations.pdf"');
+        const filename = mode === 'aggregate' ? 'donations_aggregate.pdf' : 'donations.pdf';
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.type('application/pdf');
         doc.pipe(res);
 
-        doc.fontSize(18).text('Donations Report', { align: 'center' });
+        doc.fontSize(18).text(mode === 'aggregate' ? 'Donations Aggregate Report' : 'Donations Report', { align: 'center' });
         doc.moveDown();
 
         if (results.length === 0) {
@@ -95,7 +198,7 @@ router.get('/donations/pdf', async (req, res) => {
         doc.fontSize(9).font('Helvetica-Bold');
         doc.rect(tableLeft, y, tableWidth, rowHeight).fill('#2563EB');
         allKeys.forEach((key, i) => {
-            const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            const label = prettifyKey(key);
             doc.fillColor('#FFFFFF').text(label, tableLeft + i * colWidth + 4, y + 7, { width: colWidth - 8, ellipsis: true });
         });
         y += rowHeight;

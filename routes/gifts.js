@@ -45,6 +45,7 @@ const validateQuery = [
 
 // ✅ GET API
 router.get('/', validateQuery, async (req, res) => {
+    console.log('--- Entry: GET /api/gifts ---');
     try {
         // 🔹 Validate input
         const errors = validationResult(req);
@@ -67,7 +68,7 @@ router.get('/', validateQuery, async (req, res) => {
                 description,
                 value,
                 date_given,
-                created_at 
+                created_at
             FROM gifts 
             ORDER BY id DESC
             `
@@ -89,6 +90,7 @@ router.get('/', validateQuery, async (req, res) => {
                 totalPages: Math.ceil(total / limit),
             },
         });
+        console.log(`Returned ${rows.length} gifts (Page ${page}/${Math.ceil(total / limit)})`);
 
     } catch (err) {
         console.error('Error fetching gifts:', err);
@@ -132,6 +134,7 @@ const validatePhone = [
 
 // ✅ GET API 
 router.get('/by-phone', validatePhone, async (req, res) => {
+    console.log('--- Entry: GET /api/gifts/by-phone ---');
     try {
         // 🔹 Validate input
         const errors = validationResult(req);
@@ -171,6 +174,7 @@ router.get('/by-phone', validatePhone, async (req, res) => {
             count: rows.length,
             data: rows
         });
+        console.log(`Found ${rows.length} gifts for phone: ${phone}`);
 
     } catch (err) {
         console.error('Error fetching gifts by phone:', err);
@@ -259,23 +263,39 @@ router.put('/:id', async (req, res) => {
   if (!value) return res.status(400).json({ error: 'Value is required' });
   if (!date_given) return res.status(400).json({ error: 'Date given is required' });
 
+  // Convert ISO datetime to MySQL format
+  let createdAtValue = created_at;
+  if (created_at) {
+    const d = new Date(created_at);
+    if (!isNaN(d)) {
+      createdAtValue = d.toISOString().slice(0, 19).replace('T', ' ');
+    }
+  }
+
   try {
     await db.query(
       `UPDATE gifts 
        SET phone = ?, gift_name = ?, description = ?, value = ?, date_given = ?, created_at = ?
        WHERE id = ?`,
-      [phone, gift_name, description, value, date_given, created_at, id]
+      [phone, gift_name, description, value, date_given, createdAtValue, id]
     );
 
-    res.json({ id, phone, gift_name, description, value, date_given, created_at });
+    // Log edit
+    console.log(`[${new Date().toISOString()}] [GIFT LOG] Edited gift:`, { id, phone, gift_name, description, value, date_given, created_at: createdAtValue });
+
+    res.json({ id, phone, gift_name, description, value, date_given, created_at: createdAtValue });
 
   } catch (err) {
-    res.status(500).json({ error: err });
+    if (err.code === 'ER_NO_REFERENCED_ROW_2') {
+        return res.status(400).json({ error: 'Donor with this phone number does not exist. Please add the donor first.' });
+    }
+    res.status(500).json({ error: err.message || 'Internal Server Error' });
   }
 });
 
 // ✅ POST API
 router.post('/', validateGift, async (req, res) => {
+    console.log('--- Entry: POST /api/gifts ---');
     try {
         // 🔹 Validate input
         const errors = validationResult(req);
@@ -292,6 +312,19 @@ router.post('/', validateGift, async (req, res) => {
             created_at
         } = req.body;
 
+        console.log('Creating gift with data:', { phone, gift_name, description, value, date_given, created_at });
+
+        // Convert created_at to MySQL DATETIME format if provided
+        let createdAtValue = created_at;
+        if (created_at) {
+            const d = new Date(created_at);
+            if (!isNaN(d)) {
+                createdAtValue = d.toISOString().slice(0, 19).replace('T', ' ');
+            }
+        } else {
+            createdAtValue = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        }
+
         // 🔹 Insert query
         const [result] = await db.query(
             `
@@ -305,7 +338,7 @@ router.post('/', validateGift, async (req, res) => {
                 description || null,
                 value,
                 date_given,
-                created_at || new Date() // default if not provided
+                createdAtValue
             ]
         );
 
@@ -315,6 +348,9 @@ router.post('/', validateGift, async (req, res) => {
             [result.insertId]
         );
 
+        // 🔹 Log add
+        console.log(`[${new Date().toISOString()}] [GIFT LOG] Added gift:`, rows[0]);
+
         // 🔹 Response
         res.status(201).json({
             message: 'Gift created successfully',
@@ -323,6 +359,9 @@ router.post('/', validateGift, async (req, res) => {
 
     } catch (err) {
         console.error('Error creating gift:', err);
+        if (err.code === 'ER_NO_REFERENCED_ROW_2') {
+            return res.status(400).json({ error: 'Donor with this phone number does not exist. Please add the donor first.' });
+        }
         res.status(500).json({
             error: 'Internal Server Error',
             message: err.message,
@@ -330,6 +369,23 @@ router.post('/', validateGift, async (req, res) => {
     }
 });
 
+
+// Delete gift by ID
+router.delete('/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [existing] = await db.query(`SELECT id FROM gifts WHERE id = ?`, [id]);
+        if (existing.length === 0) {
+            return res.status(404).json({ message: 'Gift not found' });
+        }
+        await db.query(`DELETE FROM gifts WHERE id = ?`, [id]);
+        console.log(`[${new Date().toISOString()}] [GIFT LOG] Deleted gift id: ${id}`);
+        res.json({ message: 'Gift deleted successfully', id });
+    } catch (err) {
+        console.error('Error deleting gift:', err);
+        res.status(500).json({ error: 'Internal Server Error', message: err.message });
+    }
+});
 
 // Delete gifts by phone number
 /**
@@ -391,6 +447,9 @@ router.delete('/by-phone', validatePhonedel, async (req, res) => {
             `DELETE FROM gifts WHERE phone = ?`,
             [phone]
         );
+
+        // Log delete
+        console.log(`[${new Date().toISOString()}] [GIFT LOG] Deleted gifts for phone: ${phone}, count: ${result.affectedRows}`);
 
         // 🔹 Response
         res.json({
