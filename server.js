@@ -11,13 +11,13 @@ console.log('JWT_SECRET in use:', process.env.JWT_SECRET);
 
 const app = express();
 
-app.use(express.json());
 app.use(cors({
     origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+app.use(express.json({ limit: '10mb' }));
 
 // Basic health check
 app.get('/api/health', (req, res) => {

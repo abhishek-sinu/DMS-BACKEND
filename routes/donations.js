@@ -251,6 +251,16 @@ router.post('/import', async (req, res) => {
     const results = [];
     for (let i = 0; i < donations.length; i++) {
         const donation = donations[i];
+        // Require both receipt_number and phone_number
+        const missingFields = [];
+        if (!donation.receipt_number && donation.receipt_number !== 0) missingFields.push('receipt_number');
+        if (!donation.phone_number && donation.phone_number !== 0) missingFields.push('phone_number');
+        if (missingFields.length > 0) {
+            const reason = `Missing required field(s): ${missingFields.join(', ')}`;
+            results.push({ row: i + 1, status: 'skipped', reason });
+            console.warn(`Row ${i + 1}: skipped - ${reason}`);
+            continue;
+        }
         try {
             // Fix transaction_date to YYYY-MM-DD if present
             if (donation.transaction_date) {
@@ -259,8 +269,23 @@ router.post('/import', async (req, res) => {
                     donation.transaction_date = d.toISOString().slice(0, 10);
                 }
             }
+            // Auto-create donor if phone not found in donors table
+            let donorCreated = false;
+            const phone = String(donation.phone_number).trim();
+            const [existingDonors] = await db.query(
+                'SELECT id FROM donors WHERE phone = ? LIMIT 1', [phone]
+            );
+            if (existingDonors.length === 0) {
+                const donorName = donation.donor_name || 'Unknown';
+                await db.query(
+                    'INSERT INTO donors (name, phone) VALUES (?, ?)',
+                    [donorName, phone]
+                );
+                donorCreated = true;
+                console.log(`Row ${i + 1}: new donor created for phone ${phone}`);
+            }
             await db.query('INSERT INTO donations SET ?', donation);
-            results.push({ row: i + 1, status: 'inserted' });
+            results.push({ row: i + 1, status: 'inserted', donorCreated });
             console.log(`Row ${i + 1}: inserted`);
         } catch (err) {
             results.push({ row: i + 1, status: 'failed', reason: err.message || err });
@@ -269,19 +294,21 @@ router.post('/import', async (req, res) => {
     }
     // Summary
     const failed = results.filter(r => r.status === 'failed');
+    const skipped = results.filter(r => r.status === 'skipped');
     const inserted = results.filter(r => r.status === 'inserted');
-    let message = '';
-    if (inserted.length === donations.length) {
-        message = 'All rows inserted successfully.';
-    } else if (inserted.length === 0) {
-        message = 'No rows inserted.';
-    } else {
-        message = `Partial insert: ${inserted.length} inserted, ${failed.length} failed.`;
-    }
+    const newDonors = inserted.filter(r => r.donorCreated).length;
+    const parts = [];
+    if (inserted.length) parts.push(`${inserted.length} inserted`);
+    if (newDonors) parts.push(`${newDonors} new donor(s) created`);
+    if (skipped.length) parts.push(`${skipped.length} skipped (missing receipt/phone)`);
+    if (failed.length) parts.push(`${failed.length} failed`);
+    const message = parts.length ? parts.join(', ') + '.' : 'No rows processed.';
     console.log(`--- Import summary: ${message} ---`);
     res.json({
         message,
         inserted: inserted.length,
+        newDonors,
+        skipped: skipped.length,
         failed: failed.length,
         details: results
     });
