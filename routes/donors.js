@@ -2,13 +2,154 @@ import express from 'express';
 const router = express.Router();
 import db from '../db.js';
 import { body, validationResult } from 'express-validator';
+import XLSX from 'xlsx';
+import PDFDocument from 'pdfkit';
 
-/**
- * @swagger
- * tags:
- *   name: Donors
- *   description: Donor management endpoints
- */
+// Parse month number (1-12) from "YYYY-MM" (month input) or full date string
+function parseMonthNum(str) {
+    if (!str) return null;
+    if (/^\d{4}-\d{2}$/.test(str)) return parseInt(str.split('-')[1], 10);
+    const d = new Date(str);
+    return isNaN(d) ? null : (d.getMonth() + 1);
+}
+
+function buildDonorFilterClause(query) {
+    const conditions = [];
+    const params = [];
+    if (query.dobFrom || query.dobTo) {
+        if (query.dobFrom) {
+            const m = parseMonthNum(query.dobFrom);
+            if (m) { conditions.push('(MONTH(donors.date_of_birth) * 100 + DAY(donors.date_of_birth)) >= ?'); params.push(m * 100 + 1); }
+        }
+        if (query.dobTo) {
+            const m = parseMonthNum(query.dobTo);
+            if (m) { conditions.push('(MONTH(donors.date_of_birth) * 100 + DAY(donors.date_of_birth)) <= ?'); params.push(m * 100 + 31); }
+        }
+    }
+    if (query.anniversaryFrom || query.anniversaryTo) {
+        if (query.anniversaryFrom) {
+            const m = parseMonthNum(query.anniversaryFrom);
+            if (m) { conditions.push('(MONTH(donors.anniversary_date) * 100 + DAY(donors.anniversary_date)) >= ?'); params.push(m * 100 + 1); }
+        }
+        if (query.anniversaryTo) {
+            const m = parseMonthNum(query.anniversaryTo);
+            if (m) { conditions.push('(MONTH(donors.anniversary_date) * 100 + DAY(donors.anniversary_date)) <= ?'); params.push(m * 100 + 31); }
+        }
+    }
+    if (query.search) {
+        const s = `%${query.search}%`;
+        conditions.push('(donors.name LIKE ? OR donors.email LIKE ? OR donors.phone LIKE ? OR donors.pan_card LIKE ?)');
+        params.push(s, s, s, s);
+    }
+    const whereSql = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    return { whereSql, params };
+}
+
+function fmtDate(val) {
+    if (!val) return '';
+    const d = new Date(val);
+    if (isNaN(d)) return '';
+    return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+}
+
+// Export donors to XLS (with optional DOB / anniversary range filters)
+router.get('/export/xls', async (req, res) => {
+    try {
+        const { whereSql, params } = buildDonorFilterClause(req.query);
+        const [results] = await db.query(
+            `SELECT donors.name, donors.email, donors.phone, donors.date_of_birth, donors.anniversary_date,
+                    donors.pan_card, donors.address, donors.city, donors.state, cultivators.name AS cultivator_name
+             FROM donors
+             LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+             ${whereSql}
+             ORDER BY donors.name ASC`,
+            params
+        );
+        const rows = results.map(r => ({
+            'Name': r.name || '',
+            'Email': r.email || '',
+            'Phone': r.phone || '',
+            'Date of Birth': fmtDate(r.date_of_birth),
+            'Anniversary': fmtDate(r.anniversary_date),
+            'PAN Card': r.pan_card || '',
+            'Cultivator': r.cultivator_name || '',
+            'Address': r.address || '',
+            'City': r.city || '',
+            'State': r.state || '',
+        }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Donors');
+        const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        res.setHeader('Content-Disposition', 'attachment; filename="donors_filtered.xlsx"');
+        res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.send(buffer);
+    } catch (err) {
+        res.status(500).json({ error: String(err) });
+    }
+});
+
+// Export donors to PDF (with optional DOB / anniversary range filters)
+router.get('/export/pdf', async (req, res) => {
+    try {
+        const { whereSql, params } = buildDonorFilterClause(req.query);
+        const [results] = await db.query(
+            `SELECT donors.name, donors.email, donors.phone, donors.date_of_birth, donors.anniversary_date,
+                    donors.pan_card, cultivators.name AS cultivator_name
+             FROM donors
+             LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+             ${whereSql}
+             ORDER BY donors.name ASC`,
+            params
+        );
+        const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+        res.setHeader('Content-Disposition', 'attachment; filename="donors_filtered.pdf"');
+        res.type('application/pdf');
+        doc.pipe(res);
+
+        doc.fontSize(16).font('Helvetica-Bold').text('Donor Report', { align: 'center' });
+        doc.moveDown(0.5);
+
+        const columns = ['name', 'email', 'phone', 'date_of_birth', 'anniversary_date', 'pan_card', 'cultivator_name'];
+        const headers = ['Name', 'Email', 'Phone', 'DOB', 'Anniversary', 'PAN Card', 'Cultivator'];
+        const colWidths = [110, 130, 85, 80, 80, 80, 95];
+        const tableLeft = 30;
+        const rowHeight = 25;
+        let y = doc.y;
+
+        // Header row
+        doc.font('Helvetica-Bold').fontSize(9);
+        doc.rect(tableLeft, y, colWidths.reduce((a, b) => a + b, 0), rowHeight).fill('#2563EB');
+        let x = tableLeft;
+        headers.forEach((h, i) => {
+            doc.fillColor('#FFFFFF').text(h, x + 4, y + 8, { width: colWidths[i] - 8, ellipsis: true });
+            x += colWidths[i];
+        });
+        y += rowHeight;
+
+        // Data rows
+        doc.font('Helvetica').fontSize(8).fillColor('#000000');
+        results.forEach((row, idx) => {
+            if (y + rowHeight > doc.page.height - 30) { doc.addPage(); y = 30; }
+            const bg = idx % 2 === 0 ? '#F3F4F6' : '#FFFFFF';
+            doc.rect(tableLeft, y, colWidths.reduce((a, b) => a + b, 0), rowHeight).fill(bg);
+            doc.fillColor('#000000');
+            x = tableLeft;
+            columns.forEach((col, i) => {
+                const val = col === 'date_of_birth' || col === 'anniversary_date' ? fmtDate(row[col]) : (row[col] != null ? String(row[col]) : '-');
+                doc.text(val, x + 4, y + 8, { width: colWidths[i] - 8, ellipsis: true });
+                x += colWidths[i];
+            });
+            y += rowHeight;
+        });
+
+        doc.end();
+    } catch (err) {
+        res.status(500).json({ error: String(err) });
+    }
+});
+
+
 
 /**
  * @swagger

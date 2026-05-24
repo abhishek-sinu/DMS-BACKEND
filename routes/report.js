@@ -103,7 +103,10 @@ function normalizeDateFields(row) {
     const normalized = { ...row };
     Object.keys(normalized).forEach(key => {
         if ((key.includes('date') || key === 'created_at') && normalized[key]) {
-            normalized[key] = new Date(normalized[key]).toLocaleDateString('en-IN');
+            const d = new Date(normalized[key]);
+            if (!isNaN(d)) {
+                normalized[key] = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+            }
         }
     });
     return normalized;
