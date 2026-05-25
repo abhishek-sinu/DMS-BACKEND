@@ -262,13 +262,24 @@ router.post('/import', async (req, res) => {
             continue;
         }
         try {
-            // Fix transaction_date to YYYY-MM-DD if present
-            if (donation.transaction_date) {
-                const d = new Date(donation.transaction_date);
-                if (!isNaN(d)) {
-                    donation.transaction_date = d.toISOString().slice(0, 10);
+                // Convert transaction_date to YYYY-MM-DD for MySQL DATE column
+                if (donation.transaction_date) {
+                    let dateStr = String(donation.transaction_date).trim();
+                    // Handle DD/MM/YYYY or DD-MM-YYYY → convert to YYYY-MM-DD
+                    let match = dateStr.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+                    if (match) {
+                        // match[1]=DD, match[2]=MM, match[3]=YYYY
+                        donation.transaction_date = `${match[3]}-${match[2]}-${match[1]}`;
+                    } else {
+                        // Try native Date parse for other formats (e.g. YYYY-MM-DD already)
+                        const d = new Date(dateStr);
+                        if (!isNaN(d)) {
+                            donation.transaction_date = d.toISOString().slice(0, 10);
+                        } else {
+                            donation.transaction_date = null;
+                        }
+                    }
                 }
-            }
             // Auto-create donor if phone not found in donors table
             let donorCreated = false;
             const phone = String(donation.phone_number).trim();
