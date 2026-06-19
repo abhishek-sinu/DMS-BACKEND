@@ -8,7 +8,7 @@ function normalizeMode(mode) {
     return mode === 'aggregate' ? 'aggregate' : 'individual';
 }
 
-function buildDonationWhereClause(query) {
+function buildDonationWhereClause(query, mode = 'individual') {
     const conditions = [];
     const params = [];
 
@@ -20,13 +20,17 @@ function buildDonationWhereClause(query) {
         conditions.push('donations.transaction_date <= ?');
         params.push(query.dateTo);
     }
-    if (query.amountMin !== undefined && query.amountMin !== '') {
-        conditions.push('donations.amount >= ?');
-        params.push(Number(query.amountMin));
-    }
-    if (query.amountMax !== undefined && query.amountMax !== '') {
-        conditions.push('donations.amount <= ?');
-        params.push(Number(query.amountMax));
+    // In aggregate mode the amount filters apply to the per-phone total (HAVING on SUM),
+    // not to individual donation rows, so only add them to WHERE in individual mode.
+    if (mode !== 'aggregate') {
+        if (query.amountMin !== undefined && query.amountMin !== '') {
+            conditions.push('donations.amount >= ?');
+            params.push(Number(query.amountMin));
+        }
+        if (query.amountMax !== undefined && query.amountMax !== '') {
+            conditions.push('donations.amount <= ?');
+            params.push(Number(query.amountMax));
+        }
     }
     if (query.scheme) {
         conditions.push('LOWER(donations.scheme_name) LIKE ?');
@@ -37,11 +41,29 @@ function buildDonationWhereClause(query) {
     return { whereSql, params };
 }
 
+function buildAggregateHavingClause(query) {
+    const conditions = [];
+    const params = [];
+
+    if (query.amountMin !== undefined && query.amountMin !== '') {
+        conditions.push('SUM(donations.amount) >= ?');
+        params.push(Number(query.amountMin));
+    }
+    if (query.amountMax !== undefined && query.amountMax !== '') {
+        conditions.push('SUM(donations.amount) <= ?');
+        params.push(Number(query.amountMax));
+    }
+
+    const havingSql = conditions.length ? `HAVING ${conditions.join(' AND ')}` : '';
+    return { havingSql, params };
+}
+
 async function getReportRows(query) {
     const mode = normalizeMode(query.mode);
-    const { whereSql, params } = buildDonationWhereClause(query);
+    const { whereSql, params } = buildDonationWhereClause(query, mode);
 
     if (mode === 'aggregate') {
+        const { havingSql, params: havingParams } = buildAggregateHavingClause(query);
         const [rows] = await db.query(
             `
             SELECT
@@ -63,9 +85,10 @@ async function getReportRows(query) {
             LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
             ${whereSql}
             GROUP BY phone_group.donor_phone
+            ${havingSql}
             ORDER BY SUM(donations.amount) DESC
             `,
-            params
+            [...params, ...havingParams]
         );
         return rows;
     }

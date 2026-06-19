@@ -43,6 +43,8 @@ import emailRouter from './routes/email.js';
 import cultivatorsRouter from './routes/cultivators.js';
 import dashboardRouter from './routes/dashboard.js';
 import giftsRouter from './routes/gifts.js';
+import schemesRouter from './routes/schemes.js';
+import templeSettingsRouter from './routes/templeSettings.js';
 
 
 
@@ -61,6 +63,8 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/docs', swaggerRouter);
 app.use('/api/email', emailRouter);
 app.use('/api/cultivators', cultivatorsRouter);
+app.use('/api/schemes', schemesRouter);
+app.use('/api/temple-settings', authenticateToken, templeSettingsRouter);
 
 
 
@@ -75,6 +79,7 @@ app.use('/api/import', authenticateToken, authorizeRoles(1), importRouter);
 app.use('/api/report', authenticateToken, authorizeRoles(1), reportRouter);
 app.use('/api/engagement', authenticateToken, authorizeRoles(1,2), engagementRouter);
 app.use('/api/gifts', authenticateToken, authorizeRoles(1,2), giftsRouter);
+app.use('/api/schemes', authenticateToken, authorizeRoles(1), schemesRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
