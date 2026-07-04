@@ -33,6 +33,7 @@ DROP TABLE IF EXISTS `donors`;
 CREATE TABLE `donors` (
   `id` int NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL,
+  `initiated_name` varchar(100) DEFAULT NULL,
   `email` varchar(100) DEFAULT NULL,
   `phone` varchar(20) DEFAULT NULL,
   `address` varchar(255) DEFAULT NULL,
@@ -48,6 +49,14 @@ CREATE TABLE `donors` (
   `address_pin` varchar(20) DEFAULT NULL,
   `cultivator_id` int DEFAULT NULL,
   `last_gift_details` text,
+  `address_line1` varchar(150) DEFAULT NULL,
+  `address_line2` varchar(150) DEFAULT NULL,
+  `post_office` varchar(100) DEFAULT NULL,
+  `city` varchar(100) DEFAULT NULL,
+  `district` varchar(100) DEFAULT NULL,
+  `state` varchar(100) DEFAULT NULL,
+  `pin_code` varchar(10) DEFAULT NULL,
+  `country` varchar(100) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `fk_cultivator` (`cultivator_id`),
   CONSTRAINT `fk_cultivator` FOREIGN KEY (`cultivator_id`) REFERENCES `cultivators` (`id`)

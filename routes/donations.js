@@ -102,7 +102,20 @@ router.get('/:id', (req, res) => {
  *               $ref: '#/components/schemas/Donation'
  */
 router.post('/', async (req, res) => {
-    const donation = req.body;
+    const body = req.body || {};
+    // Separate donor-related fields from donation columns
+    const {
+        initiated_name,
+        address_line1,
+        address_line2,
+        post_office,
+        city,
+        district,
+        state,
+        pin_code,
+        country,
+        ...donation
+    } = body;
     // Fix transaction_date to YYYY-MM-DD if present
     if (donation.transaction_date) {
         const d = new Date(donation.transaction_date);
@@ -111,6 +124,28 @@ router.post('/', async (req, res) => {
         }
     }
     try {
+        // Auto-create donor if phone not found in donors table
+        const phone = donation.phone_number ? String(donation.phone_number).trim() : '';
+        if (phone) {
+            const [existingDonors] = await db.query(
+                'SELECT id FROM donors WHERE phone = ? LIMIT 1', [phone]
+            );
+            if (existingDonors.length === 0) {
+                await db.query('INSERT INTO donors SET ?', {
+                    name: donation.donor_name || 'Unknown',
+                    phone,
+                    initiated_name: initiated_name || null,
+                    address_line1: address_line1 || null,
+                    address_line2: address_line2 || null,
+                    post_office: post_office || null,
+                    city: city || null,
+                    district: district || null,
+                    state: state || null,
+                    pin_code: pin_code || null,
+                    country: country || null,
+                });
+            }
+        }
         const [result] = await db.query('INSERT INTO donations SET ?', donation);
         // Audit log
         if (req.user && req.user.id) {

@@ -40,6 +40,7 @@ CREATE TABLE `donations` (
   `amount` decimal(12,2) DEFAULT NULL,
   `scheme_name` varchar(100) DEFAULT NULL,
   `mode_of_payment` varchar(50) DEFAULT NULL,
+  `comments` text,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=31 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
