@@ -184,6 +184,25 @@ router.get('/', (req, res) => {
     })();
 });
 
+// Get donor by phone number
+router.get('/by-phone/:phone', (req, res) => {
+    (async () => {
+        try {
+            const [results] = await db.query(
+                `SELECT donors.*, cultivators.name AS cultivator_name
+                 FROM donors
+                 LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+                 WHERE donors.phone = ? LIMIT 1`,
+                [req.params.phone]
+            );
+            if (!results[0]) return res.status(404).json({ error: 'Donor not found' });
+            res.json(results[0]);
+        } catch (err) {
+            res.status(500).json({ error: err });
+        }
+    })();
+});
+
 // Get donor by ID
 /**
  * @swagger

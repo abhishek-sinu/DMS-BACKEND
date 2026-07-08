@@ -114,6 +114,7 @@ router.post('/', async (req, res) => {
         state,
         pin_code,
         country,
+        cultivator_id,
         ...donation
     } = body;
     // Fix transaction_date to YYYY-MM-DD if present
@@ -143,7 +144,14 @@ router.post('/', async (req, res) => {
                     state: state || null,
                     pin_code: pin_code || null,
                     country: country || null,
+                    cultivator_id: cultivator_id || null,
                 });
+            } else if (cultivator_id) {
+                // Assign cultivator if not already set on the existing donor
+                await db.query(
+                    'UPDATE donors SET cultivator_id = ? WHERE id = ? AND cultivator_id IS NULL',
+                    [cultivator_id, existingDonors[0].id]
+                );
             }
         }
         const [result] = await db.query('INSERT INTO donations SET ?', donation);
