@@ -518,11 +518,15 @@ router.post('/import', async (req, res) => {
             }
         }
         if (donor.date_of_birth) {
-            const d = new Date(donor.date_of_birth);
+            // Normalize YYYY/MM/DD → YYYY-MM-DD: slash format is parsed as LOCAL time by V8,
+            // causing a one-day shift on IST servers. Dashes force UTC parsing.
+            const normalized = String(donor.date_of_birth).trim().replace(/\//g, '-');
+            const d = new Date(normalized);
             if (!isNaN(d)) donor.date_of_birth = d.toISOString().slice(0, 10);
         }
         if (donor.anniversary_date) {
-            const d = new Date(donor.anniversary_date);
+            const normalized = String(donor.anniversary_date).trim().replace(/\//g, '-');
+            const d = new Date(normalized);
             if (!isNaN(d)) donor.anniversary_date = d.toISOString().slice(0, 10);
         }
         delete donor.id;
