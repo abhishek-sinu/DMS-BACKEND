@@ -474,13 +474,12 @@ router.delete('/:id', async (req, res) => {
 
 // Bulk import donors from Excel
 router.post('/import', async (req, res) => {
-    console.log('--- Entry: POST /api/donors/import ---');
     const donors = req.body.donors;
     if (!Array.isArray(donors)) {
         return res.status(400).json({ error: 'donors must be an array' });
     }
 
-    // Get valid column names from donors table
+    // Fetch valid columns ONCE for the whole batch (not per-row)
     let validColumns = [];
     try {
         const [columns] = await db.query('SHOW COLUMNS FROM donors');
@@ -489,61 +488,97 @@ router.post('/import', async (req, res) => {
         console.error('Could not fetch donor columns:', err);
     }
 
-    const results = [];
+    // Bulk cultivator name → id lookup in a single query
+    const cultivatorMap = {};
+    try {
+        const cultivatorNames = [...new Set(donors.map(d => d.cultivator).filter(Boolean))];
+        if (cultivatorNames.length > 0) {
+            const placeholders = cultivatorNames.map(() => '?').join(',');
+            const [cRows] = await db.query(
+                `SELECT id, name FROM cultivators WHERE name IN (${placeholders})`,
+                cultivatorNames
+            );
+            cRows.forEach(r => { cultivatorMap[r.name] = r.id; });
+        }
+    } catch (e) { /* skip */ }
+
+    // Build clean donor objects for all rows
+    const cleanDonors = [];
     for (let i = 0; i < donors.length; i++) {
         const raw = donors[i];
+        const donor = {};
+        for (const [key, val] of Object.entries(raw)) {
+            if (val === null || val === undefined || val === '') continue;
+            if (key === 'cultivator') {
+                if (cultivatorMap[val]) donor.cultivator_id = cultivatorMap[val];
+                continue;
+            }
+            if (validColumns.length === 0 || validColumns.includes(key)) {
+                donor[key] = val;
+            }
+        }
+        if (donor.date_of_birth) {
+            const d = new Date(donor.date_of_birth);
+            if (!isNaN(d)) donor.date_of_birth = d.toISOString().slice(0, 10);
+        }
+        if (donor.anniversary_date) {
+            const d = new Date(donor.anniversary_date);
+            if (!isNaN(d)) donor.anniversary_date = d.toISOString().slice(0, 10);
+        }
+        delete donor.id;
+        cleanDonors.push({ donor, rowIndex: i });
+    }
+
+    // Bulk duplicate check: single SELECT for all (name, phone) pairs in this batch
+    const toCheck = cleanDonors.filter(({ donor }) => donor.name && donor.phone);
+    const existingSet = new Set();
+    if (toCheck.length > 0) {
         try {
-            const donor = {};
-            for (const [key, val] of Object.entries(raw)) {
-                if (val === null || val === undefined || val === '') continue;
-                // Handle cultivator name -> cultivator_id lookup
-                if (key === 'cultivator' && validColumns.includes('cultivator_id')) {
-                    try {
-                        const [rows] = await db.query('SELECT id FROM cultivators WHERE name = ? LIMIT 1', [val]);
-                        if (rows.length > 0) donor.cultivator_id = rows[0].id;
-                    } catch (e) { /* skip */ }
-                    continue;
-                }
-                // Only include fields that exist in the table
-                if (validColumns.length === 0 || validColumns.includes(key)) {
-                    donor[key] = val;
-                }
-            }
-            // Fix date fields to YYYY-MM-DD if present
-            if (donor.date_of_birth) {
-                const d = new Date(donor.date_of_birth);
-                if (!isNaN(d)) donor.date_of_birth = d.toISOString().slice(0, 10);
-            }
-            if (donor.anniversary_date) {
-                const d = new Date(donor.anniversary_date);
-                if (!isNaN(d)) donor.anniversary_date = d.toISOString().slice(0, 10);
-            }
-            // Remove id if present
-            delete donor.id;
-            console.log(`Row ${i + 1} data:`, JSON.stringify(donor));
-            // Check for duplicate (name + phone)
-            if (donor.name && donor.phone) {
-                const [existing] = await db.query(
-                    'SELECT id FROM donors WHERE name = ? AND phone = ? LIMIT 1',
-                    [donor.name, donor.phone]
-                );
-                if (existing.length > 0) {
-                    results.push({ row: i + 1, status: 'skipped', reason: `Duplicate: donor "${donor.name}" with phone "${donor.phone}" already exists` });
-                    console.log(`Row ${i + 1}: skipped (duplicate)`);
-                    continue;
-                }
-            }
-            const [result] = await db.query('INSERT INTO donors SET ?', donor);
-            results.push({ row: i + 1, status: 'inserted' });
-            console.log(`Row ${i + 1}: inserted`);
-        } catch (err) {
-            results.push({ row: i + 1, status: 'failed', reason: err.message || err });
-            console.error(`Row ${i + 1}: failed - ${err.message || err}`);
+            const placeholders = toCheck.map(() => '(?,?)').join(',');
+            const params = toCheck.flatMap(({ donor }) => [donor.name, donor.phone]);
+            const [existingRows] = await db.query(
+                `SELECT name, phone FROM donors WHERE (name, phone) IN (${placeholders})`,
+                params
+            );
+            existingRows.forEach(r => existingSet.add(`${r.name}|||${r.phone}`));
+        } catch (e) {
+            console.error('Bulk duplicate check error:', e);
         }
     }
-    const failed = results.filter(r => r.status === 'failed');
-    const inserted = results.filter(r => r.status === 'inserted');
-    const skipped = results.filter(r => r.status === 'skipped');
+
+    // Insert all non-duplicate rows inside a single transaction
+    const results = new Array(donors.length).fill(null);
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+        for (const { donor, rowIndex } of cleanDonors) {
+            const dupKey = `${donor.name}|||${donor.phone}`;
+            if (donor.name && donor.phone && existingSet.has(dupKey)) {
+                results[rowIndex] = { row: rowIndex + 1, status: 'skipped', reason: `Duplicate: donor "${donor.name}" with phone "${donor.phone}" already exists` };
+                continue;
+            }
+            try {
+                await conn.query('INSERT INTO donors SET ?', donor);
+                results[rowIndex] = { row: rowIndex + 1, status: 'inserted' };
+            } catch (err) {
+                results[rowIndex] = { row: rowIndex + 1, status: 'failed', reason: err.message };
+            }
+        }
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        for (let i = 0; i < donors.length; i++) {
+            if (!results[i]) results[i] = { row: i + 1, status: 'failed', reason: err.message };
+        }
+    } finally {
+        conn.release();
+    }
+
+    const allResults = results.filter(Boolean);
+    const inserted = allResults.filter(r => r.status === 'inserted');
+    const failed = allResults.filter(r => r.status === 'failed');
+    const skipped = allResults.filter(r => r.status === 'skipped');
+
     let message = '';
     if (inserted.length === donors.length) {
         message = 'All rows inserted successfully.';
@@ -555,8 +590,10 @@ router.post('/import', async (req, res) => {
         if (failed.length > 0) parts.push(`${failed.length} failed`);
         message = parts.join(', ') + '.';
     }
-    console.log(`--- Import summary: ${message} ---`);
-    res.json({ message, inserted: inserted.length, failed: failed.length, skipped: skipped.length, details: results });
+
+    // Only return failed/skipped details — keeps response payload small for large imports
+    const detailsToReturn = allResults.filter(r => r.status !== 'inserted');
+    res.json({ message, inserted: inserted.length, failed: failed.length, skipped: skipped.length, details: detailsToReturn });
 });
 
 export default router;
