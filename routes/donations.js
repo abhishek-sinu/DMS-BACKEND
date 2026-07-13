@@ -339,11 +339,15 @@ router.post('/import', async (req, res) => {
     const newPhoneSet = new Set(newPhones);
     let newDonors = 0;
     if (newPhones.length > 0) {
+        // Default cultivator: look up "Seva Office" (use null if not found)
+        const [sevaOfficeRows] = await db.query("SELECT id FROM cultivators WHERE name = 'Seva Office' LIMIT 1");
+        const sevaOfficeId = sevaOfficeRows.length > 0 ? sevaOfficeRows[0].id : null;
+
         const donorValues = newPhones.map(phone => {
             const row = validRows.find(r => r.donation.phone_number === phone);
-            return [row.donation.donor_name || 'Unknown', phone];
+            return [row.donation.donor_name || 'Unknown', phone, sevaOfficeId];
         });
-        await db.query('INSERT INTO donors (name, phone) VALUES ?', [donorValues]);
+        await db.query('INSERT INTO donors (name, phone, cultivator_id) VALUES ?', [donorValues]);
         newDonors = newPhones.length;
     }
 
