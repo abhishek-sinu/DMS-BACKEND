@@ -285,121 +285,166 @@ router.delete('/:id', async (req, res) => {
 
 // Bulk import donations from Excel
 router.post('/import', async (req, res) => {
-    const donations = req.body.donations;
-    if (!Array.isArray(donations)) {
-        return res.status(400).json({ error: 'donations must be an array' });
-    }
-
-    const skippedDetails = [];
-    const validRows = []; // { donation, rowIndex }
-
-    // Step 1: Validate and normalise dates — O(n), no DB calls
-    for (let i = 0; i < donations.length; i++) {
-        const donation = { ...donations[i] };
-        const missingFields = [];
-        if (!donation.receipt_number && donation.receipt_number !== 0) missingFields.push('receipt_number');
-        if (!donation.phone_number && donation.phone_number !== 0) missingFields.push('phone_number');
-        if (missingFields.length > 0) {
-            skippedDetails.push({ row: i + 1, status: 'skipped', reason: `Missing required field(s): ${missingFields.join(', ')}` });
-            continue;
-        }
-        if (donation.transaction_date) {
-            let dateStr = String(donation.transaction_date).trim();
-            const match = dateStr.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
-            if (match) {
-                donation.transaction_date = `${match[3]}-${match[2]}-${match[1]}`;
-            } else {
-                const d = new Date(dateStr);
-                donation.transaction_date = isNaN(d) ? null : d.toISOString().slice(0, 10);
-            }
-        }
-        donation.phone_number = String(donation.phone_number).trim();
-        validRows.push({ donation, rowIndex: i });
-    }
-
-    if (validRows.length === 0) {
-        return res.json({
-            message: skippedDetails.length ? `${skippedDetails.length} skipped (missing receipt/phone).` : 'No rows found.',
-            inserted: 0, newDonors: 0, skipped: skippedDetails.length, failed: 0,
-            details: skippedDetails
-        });
-    }
-
-    // Step 2: Bulk donor lookup — 1 query for all unique phones
-    const uniquePhones = [...new Set(validRows.map(r => r.donation.phone_number))];
-    const phonePlaceholders = uniquePhones.map(() => '?').join(',');
-    const [existingDonorRows] = await db.query(
-        `SELECT phone FROM donors WHERE phone IN (${phonePlaceholders})`,
-        uniquePhones
-    );
-    const existingPhones = new Set(existingDonorRows.map(r => r.phone));
-
-    // Step 3: Bulk INSERT new donors — 1 query
-    const newPhones = uniquePhones.filter(p => !existingPhones.has(p));
-    const newPhoneSet = new Set(newPhones);
-    let newDonors = 0;
-    if (newPhones.length > 0) {
-        // Default cultivator: look up "Seva Office" (use null if not found)
-        const [sevaOfficeRows] = await db.query("SELECT id FROM cultivators WHERE name = 'Seva Office' LIMIT 1");
-        const sevaOfficeId = sevaOfficeRows.length > 0 ? sevaOfficeRows[0].id : null;
-
-        const donorValues = newPhones.map(phone => {
-            const row = validRows.find(r => r.donation.phone_number === phone);
-            return [row.donation.donor_name || 'Unknown', phone, sevaOfficeId];
-        });
-        await db.query('INSERT INTO donors (name, phone, cultivator_id) VALUES ?', [donorValues]);
-        newDonors = newPhones.length;
-    }
-
-    // Step 4: Bulk INSERT donations — 1 query (with per-row fallback on conflict)
-    const donationValues = validRows.map(r => [
-        r.donation.receipt_number,
-        r.donation.phone_number,
-        r.donation.transaction_date || null,
-        r.donation.instrument_number || null,
-        r.donation.donor_name || null,
-        r.donation.amount || null,
-        r.donation.scheme_name || null,
-        r.donation.mode_of_payment || null
-    ]);
-
-    let insertedCount = 0;
-    const failedDetails = [];
-
     try {
-        await db.query(
-            'INSERT INTO donations (receipt_number, phone_number, transaction_date, instrument_number, donor_name, amount, scheme_name, mode_of_payment) VALUES ?',
-            [donationValues]
+        const donations = req.body.donations;
+        if (!Array.isArray(donations)) {
+            return res.status(400).json({ error: 'donations must be an array' });
+        }
+
+        const skippedDetails = [];
+        const validRows = []; // { donation, rowIndex }
+
+        // Step 1: Validate and normalize rows before DB work.
+        for (let i = 0; i < donations.length; i++) {
+            const donation = { ...donations[i] };
+            const missingFields = [];
+            if (!donation.receipt_number && donation.receipt_number !== 0) missingFields.push('receipt_number');
+            if (!donation.phone_number && donation.phone_number !== 0) missingFields.push('phone_number');
+            if (missingFields.length > 0) {
+                skippedDetails.push({ row: i + 1, status: 'skipped', reason: `Missing required field(s): ${missingFields.join(', ')}` });
+                continue;
+            }
+            if (donation.transaction_date) {
+                let dateStr = String(donation.transaction_date).trim();
+                const match = dateStr.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+                if (match) {
+                    donation.transaction_date = `${match[3]}-${match[2]}-${match[1]}`;
+                } else {
+                    const d = new Date(dateStr);
+                    donation.transaction_date = isNaN(d) ? null : d.toISOString().slice(0, 10);
+                }
+            }
+            donation.phone_number = String(donation.phone_number).trim();
+            validRows.push({ donation, rowIndex: i });
+        }
+
+        if (validRows.length === 0) {
+            return res.json({
+                message: skippedDetails.length ? `${skippedDetails.length} skipped (missing receipt/phone).` : 'No rows found.',
+                inserted: 0, newDonors: 0, skipped: skippedDetails.length, failed: 0,
+                details: skippedDetails
+            });
+        }
+
+        // Step 2: Bulk donor lookup — 1 query for all unique phones
+        const phoneToRows = new Map();
+        for (const row of validRows) {
+            const phone = row.donation.phone_number;
+            if (!phoneToRows.has(phone)) phoneToRows.set(phone, []);
+            phoneToRows.get(phone).push(row.rowIndex + 1);
+        }
+        const uniquePhones = [...new Set(validRows.map(r => r.donation.phone_number))];
+        const phonePlaceholders = uniquePhones.map(() => '?').join(',');
+        const [existingDonorRows] = await db.query(
+            `SELECT phone FROM donors WHERE phone IN (${phonePlaceholders})`,
+            uniquePhones
         );
-        insertedCount = validRows.length;
-    } catch (bulkErr) {
-        // Bulk failed (e.g. duplicate receipt_number) — fall back to per-row inserts for error detail
-        for (const { donation, rowIndex } of validRows) {
+        const existingPhones = new Set(existingDonorRows.map(r => r.phone));
+
+        // Step 3: Bulk INSERT new donors. If it fails, retry per phone so one bad row doesn't abort everything.
+        const newPhones = uniquePhones.filter(p => !existingPhones.has(p));
+        let newDonors = 0;
+        const blockedPhones = new Set();
+        const failedDetails = [];
+
+        if (newPhones.length > 0) {
+            const [sevaOfficeRows] = await db.query("SELECT id FROM cultivators WHERE name = 'Seva Office' LIMIT 1");
+            const sevaOfficeId = sevaOfficeRows.length > 0 ? sevaOfficeRows[0].id : null;
+
+            const firstRowByPhone = new Map();
+            for (const row of validRows) {
+                if (!firstRowByPhone.has(row.donation.phone_number)) {
+                    firstRowByPhone.set(row.donation.phone_number, row);
+                }
+            }
+
+            const donorValues = newPhones.map(phone => {
+                const row = firstRowByPhone.get(phone);
+                return [row.donation.donor_name || 'Unknown', phone, sevaOfficeId];
+            });
+
             try {
-                await db.query('INSERT INTO donations SET ?', donation);
-                insertedCount++;
-            } catch (rowErr) {
-                failedDetails.push({ row: rowIndex + 1, status: 'failed', reason: rowErr.message });
+                await db.query('INSERT INTO donors (name, phone, cultivator_id) VALUES ?', [donorValues]);
+                newDonors = newPhones.length;
+            } catch (bulkDonorErr) {
+                for (const phone of newPhones) {
+                    try {
+                        const row = firstRowByPhone.get(phone);
+                        await db.query('INSERT INTO donors (name, phone, cultivator_id) VALUES (?, ?, ?)', [
+                            row.donation.donor_name || 'Unknown',
+                            phone,
+                            sevaOfficeId
+                        ]);
+                        newDonors++;
+                    } catch (phoneErr) {
+                        blockedPhones.add(phone);
+                        const impactedRows = phoneToRows.get(phone) || [];
+                        for (const rowNum of impactedRows) {
+                            failedDetails.push({
+                                row: rowNum,
+                                status: 'failed',
+                                reason: `Donor create failed: ${phoneErr.message}`
+                            });
+                        }
+                    }
+                }
             }
         }
+
+        // Step 4: Bulk INSERT donations for rows not blocked by donor insert failure.
+        const rowsToInsert = validRows.filter(r => !blockedPhones.has(r.donation.phone_number));
+        const donationValues = rowsToInsert.map(r => [
+            r.donation.receipt_number,
+            r.donation.phone_number,
+            r.donation.transaction_date || null,
+            r.donation.instrument_number || null,
+            r.donation.donor_name || null,
+            r.donation.amount || null,
+            r.donation.scheme_name || null,
+            r.donation.mode_of_payment || null
+        ]);
+
+        let insertedCount = 0;
+        if (donationValues.length > 0) {
+            try {
+                await db.query(
+                    'INSERT INTO donations (receipt_number, phone_number, transaction_date, instrument_number, donor_name, amount, scheme_name, mode_of_payment) VALUES ?',
+                    [donationValues]
+                );
+                insertedCount = rowsToInsert.length;
+            } catch (bulkErr) {
+                // Bulk failed (e.g. duplicate receipt_number) — fall back to per-row inserts for exact error detail.
+                for (const { donation, rowIndex } of rowsToInsert) {
+                    try {
+                        await db.query('INSERT INTO donations SET ?', donation);
+                        insertedCount++;
+                    } catch (rowErr) {
+                        failedDetails.push({ row: rowIndex + 1, status: 'failed', reason: rowErr.message });
+                    }
+                }
+            }
+        }
+
+        const allDetails = [...skippedDetails, ...failedDetails];
+        const parts = [];
+        if (insertedCount) parts.push(`${insertedCount} inserted`);
+        if (newDonors) parts.push(`${newDonors} new donor(s) created`);
+        if (skippedDetails.length) parts.push(`${skippedDetails.length} skipped (missing receipt/phone)`);
+        if (failedDetails.length) parts.push(`${failedDetails.length} failed`);
+        const message = parts.length ? parts.join(', ') + '.' : 'No rows processed.';
+
+        res.json({
+            message,
+            inserted: insertedCount,
+            newDonors,
+            skipped: skippedDetails.length,
+            failed: failedDetails.length,
+            details: allDetails
+        });
+    } catch (err) {
+        console.error('Donation import error:', err);
+        res.status(500).json({ error: err.message || 'Import failed' });
     }
-
-    const allDetails = [...skippedDetails, ...failedDetails];
-    const parts = [];
-    if (insertedCount) parts.push(`${insertedCount} inserted`);
-    if (newDonors) parts.push(`${newDonors} new donor(s) created`);
-    if (skippedDetails.length) parts.push(`${skippedDetails.length} skipped (missing receipt/phone)`);
-    if (failedDetails.length) parts.push(`${failedDetails.length} failed`);
-    const message = parts.length ? parts.join(', ') + '.' : 'No rows processed.';
-
-    res.json({
-        message,
-        inserted: insertedCount,
-        newDonors,
-        skipped: skippedDetails.length,
-        failed: failedDetails.length,
-        details: allDetails   // only skipped/failed rows — keeps payload small
-    });
 });
 
 
