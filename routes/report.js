@@ -8,7 +8,7 @@ function normalizeMode(mode) {
     return mode === 'aggregate' ? 'aggregate' : 'individual';
 }
 
-function buildDonationWhereClause(query, mode = 'individual') {
+function buildDonationWhereClause(query, mode = 'individual', user = {}) {
     const conditions = [];
     const params = [];
 
@@ -35,6 +35,10 @@ function buildDonationWhereClause(query, mode = 'individual') {
     if (query.scheme) {
         conditions.push('LOWER(donations.scheme_name) LIKE ?');
         params.push(`%${String(query.scheme).toLowerCase()}%`);
+    }
+    if (Number(user.role_id) === 3) {
+        conditions.push('donors.cultivator_id = ?');
+        params.push(user.cultivator_id);
     }
 
     const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -68,7 +72,7 @@ function parsePagination(query = {}) {
 
 async function getReportRows(query, options = {}) {
     const mode = normalizeMode(query.mode);
-    const { whereSql, params } = buildDonationWhereClause(query, mode);
+    const { whereSql, params } = buildDonationWhereClause(query, mode, options.user);
     const usePaging = !!options.paginated;
     const { limit = 20, offset = 0 } = options;
 
@@ -202,7 +206,7 @@ function normalizeDateFields(row) {
 router.get('/donations/xls', async (req, res) => {
     try {
         const mode = normalizeMode(req.query.mode);
-        const { rows: results } = await getReportRows(req.query);
+        const { rows: results } = await getReportRows(req.query, { user: req.user });
         const cleaned = results.map(({ id, ...rest }) => normalizeDateFields(rest));
         const ws = XLSX.utils.json_to_sheet(cleaned);
         const wb = XLSX.utils.book_new();
@@ -236,7 +240,7 @@ router.get('/donations/xls', async (req, res) => {
 router.get('/donations/pdf', async (req, res) => {
     try {
         const mode = normalizeMode(req.query.mode);
-        const { rows: results } = await getReportRows(req.query);
+        const { rows: results } = await getReportRows(req.query, { user: req.user });
         const doc = new PDFDocument({ margin: 40, size: 'A4', layout: 'landscape' });
         const filename = mode === 'aggregate' ? 'donations_aggregate.pdf' : 'donations.pdf';
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -302,7 +306,12 @@ router.get('/donations', async (req, res) => {
     try {
         const { page, limit, offset } = parsePagination(req.query);
         const mode = normalizeMode(req.query.mode);
-        const { rows, total } = await getReportRows(req.query, { paginated: true, limit, offset });
+        const { rows, total } = await getReportRows(req.query, {
+            paginated: true,
+            limit,
+            offset,
+            user: req.user,
+        });
 
         res.json({
             mode,

@@ -64,6 +64,18 @@ const donorDonationAccess = authorizeRoleAccess({
     cultivator: ['GET', 'HEAD', 'OPTIONS'],
 });
 
+const giftAccess = authorizeRoleAccess({
+    'super admin': ['*'],
+    admin: ['GET', 'HEAD', 'OPTIONS', 'POST'],
+    cultivator: ['GET', 'HEAD', 'OPTIONS'],
+});
+
+const reportAccess = authorizeRoleAccess({
+    'super admin': ['*'],
+    admin: ['GET', 'HEAD', 'OPTIONS'],
+    cultivator: ['GET', 'HEAD', 'OPTIONS'],
+});
+
 app.use('/api/donors', authenticateToken, donorDonationAccess, donorsRouter);
 app.use('/api/donors', authenticateToken, donorDonationAccess, familyMembersRouter);
 app.use('/api/donations', authenticateToken, donorDonationAccess, donationsRouter);
@@ -72,11 +84,11 @@ app.use('/api/users', authenticateToken, superAdminAndAdminReadCreate, usersRout
 app.use('/api/roles', authenticateToken, authorizeRoleNames('super admin'), rolesRouter);
 app.use('/api/communication-logs', authenticateToken, superAdminAndAdminReadCreate, communicationLogsRouter);
 app.use('/api/import', authenticateToken, superAdminAndAdminReadCreate, importRouter);
-app.use('/api/report', authenticateToken, superAdminAndAdminReadCreate, reportRouter);
+app.use('/api/report', authenticateToken, reportAccess, reportRouter);
 app.use('/api/engagement', authenticateToken, superAdminAndAdminReadCreate, engagementRouter);
 app.use('/api/dashboard', authenticateToken, superAdminAndAdminReadCreate, dashboardRouter);
 app.use('/api/email', authenticateToken, superAdminAndAdminReadCreate, emailRouter);
-app.use('/api/gifts', authenticateToken, superAdminAndAdminReadCreate, giftsRouter);
+app.use('/api/gifts', authenticateToken, giftAccess, giftsRouter);
 app.use('/api/schemes', authenticateToken, superAdminAndAdminReadCreate, schemesRouter);
 app.use('/api/temple-settings', authenticateToken, superAdminAndAdminReadCreate, templeSettingsRouter);
 app.use('/api/audit-logs', authenticateToken, superAdminAll, auditLogsRouter);
