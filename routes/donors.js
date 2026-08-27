@@ -4,6 +4,23 @@ import db from '../db.js';
 import { body, validationResult } from 'express-validator';
 import XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
+import { resolveRoleName } from '../middleware/security.js';
+
+function getCultivatorScopeId(req) {
+    const role = resolveRoleName(req.user);
+    if (role !== 'cultivator') return null;
+    const cultivatorId = Number(req.user?.cultivator_id);
+    if (!Number.isInteger(cultivatorId) || cultivatorId <= 0) return -1;
+    return cultivatorId;
+}
+
+function applyCultivatorScope(whereSql, params, cultivatorId) {
+    if (cultivatorId == null) return { whereSql, params };
+    const scopedWhere = whereSql
+        ? `${whereSql} AND donors.cultivator_id = ?`
+        : 'WHERE donors.cultivator_id = ?';
+    return { whereSql: scopedWhere, params: [...params, cultivatorId] };
+}
 
 // Parse month number (1-12) from "YYYY-MM" (month input) or full date string
 function parseMonthNum(str) {
@@ -52,10 +69,20 @@ function fmtDate(val) {
     return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
 }
 
+function parsePagination(query = {}) {
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const requestedLimit = parseInt(query.limit, 10) || 20;
+    const limit = Math.min(200, Math.max(1, requestedLimit));
+    const offset = (page - 1) * limit;
+    return { page, limit, offset };
+}
+
 // Export donors to XLS (with optional DOB / anniversary range filters)
 router.get('/export/xls', async (req, res) => {
     try {
-        const { whereSql, params } = buildDonorFilterClause(req.query);
+        const cultivatorScopeId = getCultivatorScopeId(req);
+        const baseFilter = buildDonorFilterClause(req.query);
+        const { whereSql, params } = applyCultivatorScope(baseFilter.whereSql, baseFilter.params, cultivatorScopeId);
         const [results] = await db.query(
             `SELECT donors.name, donors.email, donors.phone, donors.date_of_birth, donors.anniversary_date,
                     donors.pan_card, donors.address, donors.city, donors.state, cultivators.name AS cultivator_name
@@ -92,7 +119,9 @@ router.get('/export/xls', async (req, res) => {
 // Export donors to PDF (with optional DOB / anniversary range filters)
 router.get('/export/pdf', async (req, res) => {
     try {
-        const { whereSql, params } = buildDonorFilterClause(req.query);
+        const cultivatorScopeId = getCultivatorScopeId(req);
+        const baseFilter = buildDonorFilterClause(req.query);
+        const { whereSql, params } = applyCultivatorScope(baseFilter.whereSql, baseFilter.params, cultivatorScopeId);
         const [results] = await db.query(
             `SELECT donors.name, donors.email, donors.phone, donors.date_of_birth, donors.anniversary_date,
                     donors.pan_card, cultivators.name AS cultivator_name
@@ -171,12 +200,39 @@ router.get('/export/pdf', async (req, res) => {
 router.get('/', (req, res) => {
     (async () => {
         try {
+            const cultivatorScopeId = getCultivatorScopeId(req);
+            const { page, limit, offset } = parsePagination(req.query);
+            const baseFilter = buildDonorFilterClause(req.query);
+            const { whereSql, params } = applyCultivatorScope(baseFilter.whereSql, baseFilter.params, cultivatorScopeId);
+
+            const [[{ total }]] = await db.query(
+                `SELECT COUNT(*) AS total
+                 FROM donors
+                 ${whereSql}`,
+                params
+            );
+
             const [results] = await db.query(`
                 SELECT donors.*, cultivators.name AS cultivator_name
                 FROM donors
                 LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
-            `);
-            console.log('Donor list API results:', results);
+                ${whereSql}
+                ORDER BY donors.id DESC
+                LIMIT ? OFFSET ?
+            `, [...params, limit, offset]);
+
+            if (req.query.paginated === '1') {
+                return res.json({
+                    items: results,
+                    pagination: {
+                        page,
+                        limit,
+                        total,
+                        totalPages: Math.ceil(total / limit),
+                    },
+                });
+            }
+
             res.json(results);
         } catch (err) {
             res.status(500).json({ error: err });
@@ -188,12 +244,15 @@ router.get('/', (req, res) => {
 router.get('/by-phone/:phone', (req, res) => {
     (async () => {
         try {
+            const cultivatorScopeId = getCultivatorScopeId(req);
             const [results] = await db.query(
                 `SELECT donors.*, cultivators.name AS cultivator_name
                  FROM donors
                  LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
-                 WHERE donors.phone = ? LIMIT 1`,
-                [req.params.phone]
+                 WHERE donors.phone = ?
+                 ${cultivatorScopeId == null ? '' : 'AND donors.cultivator_id = ?'}
+                 LIMIT 1`,
+                cultivatorScopeId == null ? [req.params.phone] : [req.params.phone, cultivatorScopeId]
             );
             if (!results[0]) return res.status(404).json({ error: 'Donor not found' });
             res.json(results[0]);
@@ -228,7 +287,11 @@ router.get('/by-phone/:phone', (req, res) => {
 router.get('/:id', (req, res) => {
     (async () => {
         try {
-            const [donorResults] = await db.query('SELECT * FROM donors WHERE id = ?', [req.params.id]);
+            const cultivatorScopeId = getCultivatorScopeId(req);
+            const [donorResults] = await db.query(
+                `SELECT * FROM donors WHERE id = ? ${cultivatorScopeId == null ? '' : 'AND cultivator_id = ?'}`,
+                cultivatorScopeId == null ? [req.params.id] : [req.params.id, cultivatorScopeId]
+            );
             if (!donorResults[0]) return res.status(404).json({ error: 'Donor not found' });
             const [familyResults] = await db.query('SELECT * FROM donor_family_members WHERE donor_id = ?', [req.params.id]);
             res.json({ ...donorResults[0], family_members: familyResults });
@@ -401,7 +464,7 @@ router.put('/:id', async (req, res) => {
                 donor.date_of_birth,
                 donor.anniversary_date,
                 donor.cultivator_id,
-                donor.id
+                req.params.id
             ]
         );
         res.json({ success: true });
@@ -410,7 +473,7 @@ router.put('/:id', async (req, res) => {
             await db.query('INSERT INTO audit_logs SET ?', {
                 user_id: req.user.id,
                 action: 'update_donor',
-                details: JSON.stringify({ donor_id: req.params.id, donor: donorData, family_members: familyMembers }),
+                details: JSON.stringify({ donor_id: req.params.id, donor, family_members: familyMembers }),
             });
         }
     } catch (err) {

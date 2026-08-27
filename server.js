@@ -3,9 +3,8 @@
 
 import 'dotenv/config';
 import express from 'express';
-import mysql from 'mysql2';
 import cors from 'cors';
-import { authenticateToken, authorizeRoles } from './middleware/security.js';
+import { authenticateToken, authorizeRoleAccess, authorizeRoleNames } from './middleware/security.js';
 
 console.log('JWT_SECRET in use:', process.env.JWT_SECRET);
 
@@ -47,40 +46,40 @@ import giftsRouter from './routes/gifts.js';
 import schemesRouter from './routes/schemes.js';
 import templeSettingsRouter from './routes/templeSettings.js';
 
-
-
-app.use('/api/donors', donorsRouter);
-app.use('/api/donors', familyMembersRouter);
-app.use('/api/donations', donationsRouter);
-app.use('/api/users', usersRouter);
-app.use('/api/roles', rolesRouter);
 app.use('/api/auth', authRouter);
-app.use('/api/audit-logs', auditLogsRouter);
-app.use('/api/communication-logs', communicationLogsRouter);
-app.use('/api/import', importRouter);
-app.use('/api/report', reportRouter);
-app.use('/api/engagement', engagementRouter);
-app.use('/api/dashboard', dashboardRouter);
 app.use('/api/docs', swaggerRouter);
-app.use('/api/email', emailRouter);
-app.use('/api/cultivators', cultivatorsRouter);
-app.use('/api/schemes', schemesRouter);
-app.use('/api/temple-settings', authenticateToken, templeSettingsRouter);
 
+const superAdminAll = authorizeRoleAccess({
+    'super admin': ['*'],
+});
 
+const superAdminAndAdminReadCreate = authorizeRoleAccess({
+    'super admin': ['*'],
+    admin: ['GET', 'HEAD', 'OPTIONS', 'POST'],
+});
 
-// Secure sensitive routes
-app.use('/api/donors', authenticateToken, authorizeRoles(1), donorsRouter);
-app.use('/api/donations', authenticateToken, authorizeRoles(1), donationsRouter);
-app.use('/api/users', authenticateToken, authorizeRoles(1), usersRouter);
-app.use('/api/roles', authenticateToken, authorizeRoles(1), rolesRouter);
-app.use('/api/audit-logs', authenticateToken, authorizeRoles(1), auditLogsRouter);
-app.use('/api/communication-logs', authenticateToken, authorizeRoles(1), communicationLogsRouter);
-app.use('/api/import', authenticateToken, authorizeRoles(1), importRouter);
-app.use('/api/report', authenticateToken, authorizeRoles(1), reportRouter);
-app.use('/api/engagement', authenticateToken, authorizeRoles(1,2), engagementRouter);
-app.use('/api/gifts', authenticateToken, authorizeRoles(1,2), giftsRouter);
-app.use('/api/schemes', authenticateToken, authorizeRoles(1), schemesRouter);
+const donorDonationAccess = authorizeRoleAccess({
+    'super admin': ['*'],
+    admin: ['GET', 'HEAD', 'OPTIONS', 'POST'],
+    cultivator: ['GET', 'HEAD', 'OPTIONS'],
+});
+
+app.use('/api/donors', authenticateToken, donorDonationAccess, donorsRouter);
+app.use('/api/donors', authenticateToken, donorDonationAccess, familyMembersRouter);
+app.use('/api/donations', authenticateToken, donorDonationAccess, donationsRouter);
+app.use('/api/cultivators', authenticateToken, superAdminAndAdminReadCreate, cultivatorsRouter);
+app.use('/api/users', authenticateToken, superAdminAndAdminReadCreate, usersRouter);
+app.use('/api/roles', authenticateToken, authorizeRoleNames('super admin'), rolesRouter);
+app.use('/api/communication-logs', authenticateToken, superAdminAndAdminReadCreate, communicationLogsRouter);
+app.use('/api/import', authenticateToken, superAdminAndAdminReadCreate, importRouter);
+app.use('/api/report', authenticateToken, superAdminAndAdminReadCreate, reportRouter);
+app.use('/api/engagement', authenticateToken, superAdminAndAdminReadCreate, engagementRouter);
+app.use('/api/dashboard', authenticateToken, superAdminAndAdminReadCreate, dashboardRouter);
+app.use('/api/email', authenticateToken, superAdminAndAdminReadCreate, emailRouter);
+app.use('/api/gifts', authenticateToken, superAdminAndAdminReadCreate, giftsRouter);
+app.use('/api/schemes', authenticateToken, superAdminAndAdminReadCreate, schemesRouter);
+app.use('/api/temple-settings', authenticateToken, superAdminAndAdminReadCreate, templeSettingsRouter);
+app.use('/api/audit-logs', authenticateToken, superAdminAll, auditLogsRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

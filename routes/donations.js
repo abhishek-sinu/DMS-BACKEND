@@ -1,6 +1,23 @@
 import express from 'express';
 const router = express.Router();
 import db from '../db.js';
+import { resolveRoleName } from '../middleware/security.js';
+
+function getCultivatorScopeId(req) {
+    const role = resolveRoleName(req.user);
+    if (role !== 'cultivator') return null;
+    const cultivatorId = Number(req.user?.cultivator_id);
+    if (!Number.isInteger(cultivatorId) || cultivatorId <= 0) return -1;
+    return cultivatorId;
+}
+
+function parsePagination(query = {}) {
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const requestedLimit = parseInt(query.limit, 10) || 20;
+    const limit = Math.min(200, Math.max(1, requestedLimit));
+    const offset = (page - 1) * limit;
+    return { page, limit, offset };
+}
 
 /**
  * @swagger
@@ -30,7 +47,38 @@ import db from '../db.js';
 router.get('/', (req, res) => {
     (async () => {
         try {
-        const [results] = await db.query(`
+            const cultivatorScopeId = getCultivatorScopeId(req);
+            const { page, limit, offset } = parsePagination(req.query);
+            const search = (req.query.search || '').toString().trim();
+            const whereParts = [];
+            const whereParams = [];
+
+            if (cultivatorScopeId != null) {
+                whereParts.push('donors.cultivator_id = ?');
+                whereParams.push(cultivatorScopeId);
+            }
+            if (search) {
+                whereParts.push(`(
+                    donations.receipt_number LIKE ? OR
+                    donations.phone_number LIKE ? OR
+                    donations.donor_name LIKE ? OR
+                    donations.scheme_name LIKE ? OR
+                    donations.mode_of_payment LIKE ?
+                )`);
+                const s = `%${search}%`;
+                whereParams.push(s, s, s, s, s);
+            }
+            const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+
+            const [[{ total }]] = await db.query(
+                `SELECT COUNT(*) AS total
+                 FROM donations
+                 LEFT JOIN donors ON donations.phone_number = donors.phone
+                 ${whereSql}`,
+                whereParams
+            );
+
+            const [results] = await db.query(`
                 SELECT 
                     donations.*,
                     COALESCE(donors.name, donations.donor_name) AS donor_name,
@@ -39,7 +87,23 @@ router.get('/', (req, res) => {
                 FROM donations
                 LEFT JOIN donors ON donations.phone_number = donors.phone
                 LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
-            `);
+                ${whereSql}
+                ORDER BY donations.transaction_date DESC, donations.id DESC
+                LIMIT ? OFFSET ?
+            `, [...whereParams, limit, offset]);
+
+            if (req.query.paginated === '1') {
+                return res.json({
+                    items: results,
+                    pagination: {
+                        page,
+                        limit,
+                        total,
+                        totalPages: Math.ceil(total / limit),
+                    },
+                });
+            }
+
             res.json(results);
         } catch (err) {
             res.status(500).json({ error: err });
@@ -72,7 +136,17 @@ router.get('/', (req, res) => {
 router.get('/:id', (req, res) => {
     (async () => {
         try {
-            const [results] = await db.query('SELECT * FROM donations WHERE id = ?', [req.params.id]);
+            const cultivatorScopeId = getCultivatorScopeId(req);
+            const [results] = await db.query(
+                `SELECT donations.*
+                 FROM donations
+                 LEFT JOIN donors ON donations.phone_number = donors.phone
+                 WHERE donations.id = ?
+                 ${cultivatorScopeId == null ? '' : 'AND donors.cultivator_id = ?'}
+                 LIMIT 1`,
+                cultivatorScopeId == null ? [req.params.id] : [req.params.id, cultivatorScopeId]
+            );
+            if (!results[0]) return res.status(404).json({ error: 'Donation not found' });
             res.json(results[0]);
         } catch (err) {
             res.status(500).json({ error: err });

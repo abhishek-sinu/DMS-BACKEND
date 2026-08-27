@@ -58,12 +58,40 @@ function buildAggregateHavingClause(query) {
     return { havingSql, params };
 }
 
-async function getReportRows(query) {
+function parsePagination(query = {}) {
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const requestedLimit = parseInt(query.limit, 10) || 20;
+    const limit = Math.min(200, Math.max(1, requestedLimit));
+    const offset = (page - 1) * limit;
+    return { page, limit, offset };
+}
+
+async function getReportRows(query, options = {}) {
     const mode = normalizeMode(query.mode);
     const { whereSql, params } = buildDonationWhereClause(query, mode);
+    const usePaging = !!options.paginated;
+    const { limit = 20, offset = 0 } = options;
 
     if (mode === 'aggregate') {
         const { havingSql, params: havingParams } = buildAggregateHavingClause(query);
+        const countSql = `
+            SELECT COUNT(*) AS total
+            FROM (
+                SELECT phone_group.donor_phone
+                FROM donations
+                JOIN (
+                    SELECT id, COALESCE(NULLIF(phone_number, ''), CONCAT('NO_PHONE_', id)) AS donor_phone
+                    FROM donations
+                ) AS phone_group ON phone_group.id = donations.id
+                LEFT JOIN donors ON donations.phone_number = donors.phone
+                LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+                ${whereSql}
+                GROUP BY phone_group.donor_phone
+                ${havingSql}
+            ) grouped
+        `;
+        const [[{ total }]] = await db.query(countSql, [...params, ...havingParams]);
+
         const [rows] = await db.query(
             `
             SELECT
@@ -87,11 +115,23 @@ async function getReportRows(query) {
             GROUP BY phone_group.donor_phone
             ${havingSql}
             ORDER BY SUM(donations.amount) DESC
+            ${usePaging ? 'LIMIT ? OFFSET ?' : ''}
             `,
-            [...params, ...havingParams]
+            usePaging ? [...params, ...havingParams, limit, offset] : [...params, ...havingParams]
         );
-        return rows;
+        return { rows, total };
     }
+
+    const [[{ total }]] = await db.query(
+        `
+        SELECT COUNT(*) AS total
+        FROM donations
+        LEFT JOIN donors ON donations.phone_number = donors.phone
+        LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
+        ${whereSql}
+        `,
+        params
+    );
 
     const [rows] = await db.query(
         `
@@ -111,11 +151,12 @@ async function getReportRows(query) {
         LEFT JOIN cultivators ON donors.cultivator_id = cultivators.id
         ${whereSql}
         ORDER BY donations.transaction_date DESC, donations.id DESC
+        ${usePaging ? 'LIMIT ? OFFSET ?' : ''}
         `,
-        params
+        usePaging ? [...params, limit, offset] : params
     );
 
-    return rows;
+    return { rows, total };
 }
 
 function prettifyKey(key) {
@@ -161,7 +202,7 @@ function normalizeDateFields(row) {
 router.get('/donations/xls', async (req, res) => {
     try {
         const mode = normalizeMode(req.query.mode);
-        const results = await getReportRows(req.query);
+        const { rows: results } = await getReportRows(req.query);
         const cleaned = results.map(({ id, ...rest }) => normalizeDateFields(rest));
         const ws = XLSX.utils.json_to_sheet(cleaned);
         const wb = XLSX.utils.book_new();
@@ -195,7 +236,7 @@ router.get('/donations/xls', async (req, res) => {
 router.get('/donations/pdf', async (req, res) => {
     try {
         const mode = normalizeMode(req.query.mode);
-        const results = await getReportRows(req.query);
+        const { rows: results } = await getReportRows(req.query);
         const doc = new PDFDocument({ margin: 40, size: 'A4', layout: 'landscape' });
         const filename = mode === 'aggregate' ? 'donations_aggregate.pdf' : 'donations.pdf';
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -253,6 +294,28 @@ router.get('/donations/pdf', async (req, res) => {
         doc.end();
     } catch (err) {
         res.status(500).json({ error: err });
+    }
+});
+
+// Paginated JSON report data for on-screen tables.
+router.get('/donations', async (req, res) => {
+    try {
+        const { page, limit, offset } = parsePagination(req.query);
+        const mode = normalizeMode(req.query.mode);
+        const { rows, total } = await getReportRows(req.query, { paginated: true, limit, offset });
+
+        res.json({
+            mode,
+            items: rows,
+            pagination: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message || err });
     }
 });
 

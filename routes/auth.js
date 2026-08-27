@@ -3,6 +3,27 @@ const router = express.Router();
 import db from '../db.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { authenticateToken, authorizeRoleNames } from '../middleware/security.js';
+
+async function ensureCoreRoles() {
+    // Keep role IDs stable for existing clients that rely on role_id checks.
+    await db.query(
+        `INSERT INTO roles (id, name, permissions) VALUES (1, 'Super Admin', NULL)
+         ON DUPLICATE KEY UPDATE name = VALUES(name)`
+    );
+    await db.query(
+        `INSERT INTO roles (id, name, permissions) VALUES (2, 'Admin', NULL)
+         ON DUPLICATE KEY UPDATE name = VALUES(name)`
+    );
+    await db.query(
+        `INSERT INTO roles (id, name, permissions) VALUES (3, 'Cultivator', NULL)
+         ON DUPLICATE KEY UPDATE name = VALUES(name)`
+    );
+}
+
+function normalizePhone(value) {
+    return String(value || '').replace(/\D/g, '');
+}
 
 /**
  * @swagger
@@ -48,24 +69,94 @@ router.post('/login', async (req, res) => {
     const { username, password } = req.body;
     console.log('[LOGIN] Incoming:', { username });
     try {
-        const [results] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
+        await ensureCoreRoles();
+
+        const [results] = await db.query(
+            `SELECT users.*, roles.name AS role_name
+             FROM users
+             LEFT JOIN roles ON roles.id = users.role_id
+             WHERE users.username = ?
+             LIMIT 1`,
+            [username]
+        );
         console.log('[LOGIN] User lookup results:', results);
-        if (!results.length) {
-            console.warn('[LOGIN] Invalid credentials: user not found');
+        if (results.length) {
+            const user = results[0];
+            const isMatch = await bcrypt.compare(password, user.password_hash);
+            console.log('[LOGIN] Password compare result:', isMatch);
+            if (!isMatch) {
+                console.warn('[LOGIN] Invalid credentials: password mismatch');
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+
+            const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+            const tokenPayload = {
+                id: user.id,
+                username: user.username,
+                role_id: user.role_id,
+                role_name: user.role_name || null,
+                cultivator_id: null,
+            };
+            const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '1d' });
+            console.log('[LOGIN] Token generated for users table login');
+            return res.json({
+                success: true,
+                token,
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    role_id: user.role_id,
+                    role_name: user.role_name || null,
+                    cultivator_id: null,
+                },
+            });
+        }
+
+        // Cultivator login flow:
+        // username must be cultivator phone, password defaults to <phone>#108
+        const normalizedPhone = normalizePhone(username);
+        const expectedPassword = `${normalizedPhone}#108`;
+        if (!normalizedPhone || password !== expectedPassword) {
+            console.warn('[LOGIN] Invalid credentials: user not found and cultivator default password mismatch');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
-        const user = results[0];
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-        console.log('[LOGIN] Password compare result:', isMatch);
-        if (!isMatch) {
-            console.warn('[LOGIN] Invalid credentials: password mismatch');
+
+        const [cultivators] = await db.query(
+            `SELECT id, name, phone
+             FROM cultivators
+             WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', '') = ?
+             LIMIT 1`,
+            [normalizedPhone]
+        );
+        if (!cultivators.length) {
+            console.warn('[LOGIN] Cultivator not found for phone:', normalizedPhone);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
+
+        const cultivator = cultivators[0];
         const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
-        const token = jwt.sign({ id: user.id, username: user.username, role_id: user.role_id }, JWT_SECRET, { expiresIn: '1d' });
-        console.log('[LOGIN] Token generated:', token);
-        res.json({ success: true, token, user: { id: user.id, username: user.username, role_id: user.role_id } });
-        console.log('[LOGIN] Response sent:', { id: user.id, username: user.username, role_id: user.role_id });
+        const tokenPayload = {
+            id: cultivator.id,
+            username: normalizedPhone,
+            role_id: 3,
+            role_name: 'Cultivator',
+            cultivator_id: cultivator.id,
+        };
+        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '1d' });
+        console.log('[LOGIN] Token generated for cultivator login');
+        return res.json({
+            success: true,
+            token,
+            user: {
+                id: cultivator.id,
+                username: normalizedPhone,
+                name: cultivator.name,
+                phone: cultivator.phone,
+                role_id: 3,
+                role_name: 'Cultivator',
+                cultivator_id: cultivator.id,
+            },
+        });
     } catch (err) {
         console.error('[LOGIN] DB error:', err);
         return res.status(500).json({ error: err });
@@ -102,7 +193,7 @@ router.post('/login', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/User'
  */
-router.post('/register', (req, res) => {
+router.post('/register', authenticateToken, authorizeRoleNames('super admin', 'admin'), (req, res) => {
     const { username, email, password, role_id } = req.body;
     console.log('[REGISTER] Incoming:', { username, email, role_id });
     const userRoleId = role_id || 2;
@@ -134,12 +225,12 @@ router.post('/register', (req, res) => {
     };
     if (!role_id) {
         // Insert Guest role if not present
-        db.query('INSERT IGNORE INTO roles SET ?', { id: 2, name: 'Guest' }, (roleErr) => {
+        db.query('INSERT IGNORE INTO roles SET ?', { id: 2, name: 'Admin' }, (roleErr) => {
             if (roleErr) {
                 console.error('[REGISTER] Role insert error:', roleErr);
                 return res.status(500).json({ error: roleErr });
             }
-            console.log('[REGISTER] Guest role insert success or already exists: 2');
+            console.log('[REGISTER] Admin role insert success or already exists: 2');
             insertUser(2);
         });
     } else {
