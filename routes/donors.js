@@ -325,17 +325,17 @@ router.get('/:id', (req, res) => {
 router.post('/',
     [
         body('name').notEmpty().withMessage('Name is required'),
+        body('phone').notEmpty().withMessage('Phone is required'),
+        body('cultivator_id').notEmpty().withMessage('Cultivator is required'),
         body('initiated_name').optional({ nullable: true }).isString(),
-        body('email').isEmail().optional({ nullable: true }).withMessage('Invalid email'),
-        body('phone').isString().optional({ nullable: true }),
-        body('date_of_birth').optional({ nullable: true }).isISO8601().withMessage('Invalid date'),
-        body('anniversary_date').optional({ nullable: true }).isISO8601().withMessage('Invalid date'),
+        body('email').optional({ nullable: true, checkFalsy: true }).isEmail().withMessage('Invalid email'),
+        body('date_of_birth').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('Invalid date'),
+        body('anniversary_date').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('Invalid date'),
         body('pan_card').optional({ nullable: true }).isString(),
         body('address_house').optional({ nullable: true }).isString(),
         body('address_city').optional({ nullable: true }).isString(),
         body('address_state').optional({ nullable: true }).isString(),
         body('address_pin').optional({ nullable: true }).isString(),
-        body('address_line1').optional({ nullable: true }).isString(),
         body('address_line2').optional({ nullable: true }).isString(),
         body('post_office').optional({ nullable: true }).isString(),
         body('city').optional({ nullable: true }).isString(),
@@ -352,6 +352,9 @@ router.post('/',
             return res.status(400).json({ errors: errors.array() });
         }
         const donor = req.body;
+        // Sanitize empty date fields to NULL (empty string is invalid for MySQL date columns)
+        donor.date_of_birth = sanitizeDateField(donor.date_of_birth);
+        donor.anniversary_date = sanitizeDateField(donor.anniversary_date);
         try {
             // Check for duplicate donor (name + phone)
             if (donor.name && donor.phone) {
@@ -417,6 +420,9 @@ router.post('/',
 router.put('/:id', async (req, res) => {
     try {
         const donor = req.body;
+        if (!donor.name || !donor.phone || !donor.cultivator_id) {
+            return res.status(400).json({ error: 'Name, phone and cultivator are required' });
+        }
         // Sanitize date fields
         donor.anniversary_date = sanitizeDateField(donor.anniversary_date);
         donor.date_of_birth = sanitizeDateField(donor.date_of_birth);
@@ -536,6 +542,25 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Bulk import donors from Excel
+// Parses dates from Excel/manual entry: supports YYYY-MM-DD, YYYY/MM/DD and DD-MM-YYYY, DD/MM/YYYY.
+// Returns 'YYYY-MM-DD' or null if unparseable (so invalid strings are dropped instead of sent to MySQL).
+function parseImportDate(value) {
+    const str = String(value).trim();
+    const ymd = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (ymd) {
+        const [, y, m, d] = ymd;
+        return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+    const dmy = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (dmy) {
+        const [, d, m, y] = dmy;
+        return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+    const parsed = new Date(str);
+    if (!isNaN(parsed)) return parsed.toISOString().slice(0, 10);
+    return null;
+}
+
 router.post('/import', async (req, res) => {
     const donors = req.body.donors;
     if (!Array.isArray(donors)) {
@@ -581,52 +606,50 @@ router.post('/import', async (req, res) => {
             }
         }
         if (donor.date_of_birth) {
-            // Normalize YYYY/MM/DD → YYYY-MM-DD: slash format is parsed as LOCAL time by V8,
-            // causing a one-day shift on IST servers. Dashes force UTC parsing.
-            const normalized = String(donor.date_of_birth).trim().replace(/\//g, '-');
-            const d = new Date(normalized);
-            if (!isNaN(d)) donor.date_of_birth = d.toISOString().slice(0, 10);
+            const parsed = parseImportDate(donor.date_of_birth);
+            if (parsed) donor.date_of_birth = parsed;
+            else delete donor.date_of_birth;
         }
         if (donor.anniversary_date) {
-            const normalized = String(donor.anniversary_date).trim().replace(/\//g, '-');
-            const d = new Date(normalized);
-            if (!isNaN(d)) donor.anniversary_date = d.toISOString().slice(0, 10);
+            const parsed = parseImportDate(donor.anniversary_date);
+            if (parsed) donor.anniversary_date = parsed;
+            else delete donor.anniversary_date;
         }
         delete donor.id;
         cleanDonors.push({ donor, rowIndex: i });
     }
 
-    // Bulk duplicate check: single SELECT for all (name, phone) pairs in this batch
-    const toCheck = cleanDonors.filter(({ donor }) => donor.name && donor.phone);
-    const existingSet = new Set();
-    if (toCheck.length > 0) {
+    // Bulk lookup: find existing donor ids by phone number for this batch
+    const phones = [...new Set(cleanDonors.map(({ donor }) => donor.phone).filter(Boolean))];
+    const phoneToIdMap = {};
+    if (phones.length > 0) {
         try {
-            const placeholders = toCheck.map(() => '(?,?)').join(',');
-            const params = toCheck.flatMap(({ donor }) => [donor.name, donor.phone]);
+            const placeholders = phones.map(() => '?').join(',');
             const [existingRows] = await db.query(
-                `SELECT name, phone FROM donors WHERE (name, phone) IN (${placeholders})`,
-                params
+                `SELECT id, phone FROM donors WHERE phone IN (${placeholders})`,
+                phones
             );
-            existingRows.forEach(r => existingSet.add(`${r.name}|||${r.phone}`));
+            existingRows.forEach(r => { phoneToIdMap[r.phone] = r.id; });
         } catch (e) {
-            console.error('Bulk duplicate check error:', e);
+            console.error('Bulk phone lookup error:', e);
         }
     }
 
-    // Insert all non-duplicate rows inside a single transaction
+    // Insert new rows / update existing rows (matched by phone) inside a single transaction
     const results = new Array(donors.length).fill(null);
     const conn = await db.getConnection();
     try {
         await conn.beginTransaction();
         for (const { donor, rowIndex } of cleanDonors) {
-            const dupKey = `${donor.name}|||${donor.phone}`;
-            if (donor.name && donor.phone && existingSet.has(dupKey)) {
-                results[rowIndex] = { row: rowIndex + 1, status: 'skipped', reason: `Duplicate: donor "${donor.name}" with phone "${donor.phone}" already exists` };
-                continue;
-            }
+            const existingId = donor.phone ? phoneToIdMap[donor.phone] : null;
             try {
-                await conn.query('INSERT INTO donors SET ?', donor);
-                results[rowIndex] = { row: rowIndex + 1, status: 'inserted' };
+                if (existingId) {
+                    await conn.query('UPDATE donors SET ? WHERE id = ?', [donor, existingId]);
+                    results[rowIndex] = { row: rowIndex + 1, status: 'updated' };
+                } else {
+                    await conn.query('INSERT INTO donors SET ?', donor);
+                    results[rowIndex] = { row: rowIndex + 1, status: 'inserted' };
+                }
             } catch (err) {
                 results[rowIndex] = { row: rowIndex + 1, status: 'failed', reason: err.message };
             }
@@ -643,24 +666,24 @@ router.post('/import', async (req, res) => {
 
     const allResults = results.filter(Boolean);
     const inserted = allResults.filter(r => r.status === 'inserted');
+    const updated = allResults.filter(r => r.status === 'updated');
     const failed = allResults.filter(r => r.status === 'failed');
-    const skipped = allResults.filter(r => r.status === 'skipped');
 
     let message = '';
     if (inserted.length === donors.length) {
         message = 'All rows inserted successfully.';
-    } else if (inserted.length === 0 && skipped.length === 0) {
+    } else if (inserted.length === 0 && updated.length === 0) {
         message = 'No rows inserted.';
     } else {
         const parts = [`${inserted.length} inserted`];
-        if (skipped.length > 0) parts.push(`${skipped.length} skipped (duplicates)`);
+        if (updated.length > 0) parts.push(`${updated.length} updated (existing phone match)`);
         if (failed.length > 0) parts.push(`${failed.length} failed`);
         message = parts.join(', ') + '.';
     }
 
-    // Only return failed/skipped details — keeps response payload small for large imports
+    // Only return failed/updated details — keeps response payload small for large imports
     const detailsToReturn = allResults.filter(r => r.status !== 'inserted');
-    res.json({ message, inserted: inserted.length, failed: failed.length, skipped: skipped.length, details: detailsToReturn });
+    res.json({ message, inserted: inserted.length, updated: updated.length, failed: failed.length, details: detailsToReturn });
 });
 
 export default router;
