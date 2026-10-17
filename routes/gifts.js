@@ -56,38 +56,32 @@ router.get('/', validateQuery, async (req, res) => {
         // 🔹 Pagination params
         const page = Number(req.query.page) || 1;
         const limit = Number(req.query.limit) || 100000;
-        const offset = (page - 1) * limit;
 
         // 🔹 Main query (ALL columns)
         const cultivatorFilter = Number(req.user?.role_id) === 3
-            ? 'WHERE d.cultivator_id = ?'
+            ? 'WHERE EXISTS (SELECT 1 FROM donors d WHERE d.phone = g.phone AND d.cultivator_id = ?)'
             : '';
         const queryParams = Number(req.user?.role_id) === 3 ? [req.user.cultivator_id] : [];
         const [rows] = await db.query(
             `
             SELECT 
                 g.id,
-                d.phone,
-                g.donor_id,
+                g.phone,
                 g.gift_name,
                 g.description,
                 g.value,
                 g.date_given,
                 g.created_at
             FROM gifts g
-            INNER JOIN donors d ON d.id = g.donor_id
             ${cultivatorFilter}
-            ORDER BY id DESC
+            ORDER BY g.id DESC
             `,
             queryParams
         );
-            // LIMIT ? OFFSET ?
-            // [limit, offset]
         // 🔹 Count query
         const [[{ total }]] = await db.query(
             `SELECT COUNT(*) as total
              FROM gifts g
-             INNER JOIN donors d ON d.id = g.donor_id
              ${cultivatorFilter}`,
             queryParams
         );
@@ -158,7 +152,7 @@ router.get('/by-phone', validatePhone, async (req, res) => {
 
         // 🔹 Query DB
         const cultivatorFilter = Number(req.user?.role_id) === 3
-            ? 'AND d.cultivator_id = ?'
+            ? 'AND EXISTS (SELECT 1 FROM donors d WHERE d.phone = g.phone AND d.cultivator_id = ?)'
             : '';
         const queryParams = Number(req.user?.role_id) === 3
             ? [phone, req.user.cultivator_id]
@@ -167,16 +161,14 @@ router.get('/by-phone', validatePhone, async (req, res) => {
             `
             SELECT 
                 g.id,
-                d.phone,
-                g.donor_id,
+                g.phone,
                 g.gift_name,
                 g.description,
                 g.value,
                 g.date_given,
                 g.created_at
             FROM gifts g
-            INNER JOIN donors d ON d.id = g.donor_id
-            WHERE d.phone = ? ${cultivatorFilter}
+            WHERE g.phone = ? ${cultivatorFilter}
             ORDER BY g.date_given DESC
             `,
             queryParams

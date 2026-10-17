@@ -171,6 +171,8 @@ function normalizeDateFields(row) {
     const normalized = { ...row };
     Object.keys(normalized).forEach(key => {
         if ((key.includes('date') || key === 'created_at') && normalized[key]) {
+            const m = typeof normalized[key] === 'string' && normalized[key].match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (m) { normalized[key] = `${m[3]}-${m[2]}-${m[1]}`; return; }
             const d = new Date(normalized[key]);
             if (!isNaN(d)) {
                 normalized[key] = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;

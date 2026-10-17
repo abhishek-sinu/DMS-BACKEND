@@ -14,6 +14,14 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: Number(process.env.DB_CONN_LIMIT) || 10,
     queueLimit: 0,
+    // Return DOB/anniversary as plain 'YYYY-MM-DD' strings so server/browser
+    // timezone differences can't shift them by a day.
+    typeCast(field, next) {
+        if (field.type === 'DATE' && (field.name === 'date_of_birth' || field.name === 'anniversary_date')) {
+            return field.string();
+        }
+        return next();
+    },
 });
 
 console.log('MySQL pool created');

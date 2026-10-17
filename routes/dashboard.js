@@ -6,9 +6,85 @@ import PDFDocument from 'pdfkit';
 
 function fmtDate(val) {
     if (!val) return '';
+    const m = typeof val === 'string' && val.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[3]}-${m[2]}-${m[1]}`;
     const d = new Date(val);
     if (isNaN(d)) return '';
     return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+}
+
+function donorAddress(donor) {
+    const structured = [
+        donor.address_line1, donor.address_line2, donor.post_office, donor.city,
+        donor.district, donor.state, donor.pin_code, donor.country,
+    ].filter(Boolean);
+    if (structured.length) return structured.join(' , ');
+    const legacy = [
+        donor.address_house, donor.address_city, donor.address_state,
+        donor.address_house || donor.address_city ? 'India' : '', donor.address_pin,
+    ].filter(Boolean);
+    return legacy.length ? legacy.join(' , ') : donor.address || '';
+}
+
+async function completeExportRows(results, birthdays) {
+    if (!results.length) return [];
+    const ids = [...new Set(results.map(row => row.donor_id))];
+    const placeholders = ids.map(() => '?').join(',');
+    const [donors] = await db.query(`SELECT * FROM donors WHERE id IN (${placeholders})`, ids);
+    const [members] = await db.query(
+        `SELECT * FROM donor_family_members WHERE donor_id IN (${placeholders}) ORDER BY id`, ids
+    );
+    const donorById = new Map(donors.map(donor => [donor.id, donor]));
+    const familyById = new Map();
+    for (const member of members) {
+        if (!familyById.has(member.donor_id)) familyById.set(member.donor_id, []);
+        familyById.get(member.donor_id).push(member);
+    }
+    return results.map((row, index) => {
+        const donor = donorById.get(row.donor_id);
+        if (!donor) throw new Error(`Donor ${row.donor_id} not found during export`);
+        const family = familyById.get(row.donor_id) || [];
+        return {
+            '#': index + 1,
+            'Donor Name': donor.name || '-',
+            ...(birthdays ? {
+                'Family Member': row.person_type === 'family' ? row.person_name || '-' : '-',
+                'Relation': row.person_type === 'family' ? row.relationship || '-' : '-',
+                'Birthday': fmtDate(row.birthday) || '-',
+            } : {}),
+            'Phone': donor.phone || '-',
+            'Email': donor.email || '-',
+            'Donor Date of Birth': fmtDate(donor.date_of_birth) || '-',
+            'Anniversary Date': fmtDate(donor.anniversary_date) || '-',
+            'Address': donorAddress(donor) || '-',
+            'Family Members': family.length ? family.map(member =>
+                `${member.name || '-'} | Relation: ${member.relation || '-'} | DOB: ${fmtDate(member.date_of_birth) || '-'}`
+            ).join('\n') : 'No family members added.',
+        };
+    });
+}
+
+function sendDetailsPdf(res, rows, birthdays) {
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const type = birthdays ? 'Birthdays' : 'Anniversaries';
+    res.setHeader('Content-Disposition', `attachment; filename="upcoming_${type.toLowerCase()}.pdf"`);
+    res.type('application/pdf');
+    doc.pipe(res);
+    doc.fontSize(16).font('Helvetica-Bold').text(`Upcoming ${type} (Next 30 Days)`, { align: 'center' });
+    doc.moveDown();
+    if (!rows.length) doc.font('Helvetica').fontSize(10).text('No upcoming events.');
+    rows.forEach((row, index) => {
+        if (index) doc.addPage();
+        doc.font('Helvetica-Bold').fontSize(12).text(`${row['#']}. ${row['Donor Name']}`);
+        doc.moveDown(0.5);
+        for (const [label, value] of Object.entries(row)) {
+            if (label === '#' || label === 'Donor Name') continue;
+            doc.font('Helvetica-Bold').fontSize(10).text(`${label}:`);
+            doc.font('Helvetica').text(String(value), { lineGap: 2 });
+            doc.moveDown(0.5);
+        }
+    });
+    doc.end();
 }
 
 // Dashboard stats
@@ -171,14 +247,7 @@ router.get('/upcoming-birthdays/export/xls', async (req, res) => {
                     BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
             ) AS upcoming ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(upcoming.birthday), '-', DAY(upcoming.birthday))) ASC, donor_name ASC
         `);
-        const rows = results.map((r, i) => ({
-            '#': i + 1,
-            'Donor Name': r.donor_name || '',
-            'Family Member': r.person_type === 'family' ? (r.person_name || '') : '-',
-            'Relation': r.person_type === 'family' ? (r.relationship || '') : '-',
-            'Phone': r.phone || '',
-            'Date of Birth': fmtDate(r.birthday),
-        }));
+        const rows = await completeExportRows(results, true);
         const ws = XLSX.utils.json_to_sheet(rows);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Upcoming Birthdays');
@@ -210,40 +279,8 @@ router.get('/upcoming-birthdays/export/pdf', async (req, res) => {
                     BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
             ) AS upcoming ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(upcoming.birthday), '-', DAY(upcoming.birthday))) ASC, donor_name ASC
         `);
-        const doc = new PDFDocument({ margin: 40, size: 'A4' });
-        res.setHeader('Content-Disposition', 'attachment; filename="upcoming_birthdays.pdf"');
-        res.type('application/pdf');
-        doc.pipe(res);
-        doc.fontSize(16).font('Helvetica-Bold').text('Upcoming Birthdays (Next 30 Days)', { align: 'center' });
-        doc.moveDown(0.5);
-        const cols = ['donor_name', 'person_name', 'relationship', 'phone', 'birthday'];
-        const headers = ['Donor Name', 'Family Member', 'Relation', 'Phone', 'Date of Birth'];
-        const widths = [130, 110, 80, 90, 90];
-        const tableLeft = 40;
-        const rowH = 25;
-        let y = doc.y;
-        doc.font('Helvetica-Bold').fontSize(9);
-        doc.rect(tableLeft, y, widths.reduce((a, b) => a + b, 0), rowH).fill('#2563EB');
-        let x = tableLeft;
-        headers.forEach((h, i) => { doc.fillColor('#FFFFFF').text(h, x + 4, y + 8, { width: widths[i] - 8 }); x += widths[i]; });
-        y += rowH;
-        doc.font('Helvetica').fontSize(8).fillColor('#000000');
-        results.forEach((r, idx) => {
-            if (y + rowH > doc.page.height - 40) { doc.addPage(); y = 40; }
-            doc.rect(tableLeft, y, widths.reduce((a, b) => a + b, 0), rowH).fill(idx % 2 === 0 ? '#F3F4F6' : '#FFFFFF');
-            doc.fillColor('#000000');
-            x = tableLeft;
-            const vals = [
-                r.donor_name || '-',
-                r.person_type === 'family' ? (r.person_name || '-') : '-',
-                r.person_type === 'family' ? (r.relationship || '-') : '-',
-                r.phone || '-',
-                fmtDate(r.birthday),
-            ];
-            vals.forEach((v, i) => { doc.text(v, x + 4, y + 8, { width: widths[i] - 8, ellipsis: true }); x += widths[i]; });
-            y += rowH;
-        });
-        doc.end();
+        const rows = await completeExportRows(results, true);
+        sendDetailsPdf(res, rows, true);
     } catch (err) {
         res.status(500).json({ error: 'Export failed' });
     }
@@ -259,12 +296,7 @@ router.get('/upcoming-anniversaries/export/xls', async (req, res) => {
                 BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
             ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(anniversary_date), '-', DAY(anniversary_date))) ASC
         `);
-        const rows = results.map((r, i) => ({
-            '#': i + 1,
-            'Name': r.name || '',
-            'Phone': r.phone || '',
-            'Anniversary Date': fmtDate(r.anniversary_date),
-        }));
+        const rows = await completeExportRows(results, false);
         const ws = XLSX.utils.json_to_sheet(rows);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Upcoming Anniversaries');
@@ -287,34 +319,8 @@ router.get('/upcoming-anniversaries/export/pdf', async (req, res) => {
                 BETWEEN DAYOFYEAR(CURDATE()) AND DAYOFYEAR(CURDATE()) + 30
             ORDER BY DAYOFYEAR(CONCAT(YEAR(CURDATE()), '-', MONTH(anniversary_date), '-', DAY(anniversary_date))) ASC
         `);
-        const doc = new PDFDocument({ margin: 40, size: 'A4' });
-        res.setHeader('Content-Disposition', 'attachment; filename="upcoming_anniversaries.pdf"');
-        res.type('application/pdf');
-        doc.pipe(res);
-        doc.fontSize(16).font('Helvetica-Bold').text('Upcoming Anniversaries (Next 30 Days)', { align: 'center' });
-        doc.moveDown(0.5);
-        const headers = ['Name', 'Phone', 'Anniversary Date'];
-        const widths = [220, 130, 130];
-        const tableLeft = 40;
-        const rowH = 25;
-        let y = doc.y;
-        doc.font('Helvetica-Bold').fontSize(9);
-        doc.rect(tableLeft, y, widths.reduce((a, b) => a + b, 0), rowH).fill('#DB2777');
-        let x = tableLeft;
-        headers.forEach((h, i) => { doc.fillColor('#FFFFFF').text(h, x + 4, y + 8, { width: widths[i] - 8 }); x += widths[i]; });
-        y += rowH;
-        doc.font('Helvetica').fontSize(8).fillColor('#000000');
-        results.forEach((r, idx) => {
-            if (y + rowH > doc.page.height - 40) { doc.addPage(); y = 40; }
-            doc.rect(tableLeft, y, widths.reduce((a, b) => a + b, 0), rowH).fill(idx % 2 === 0 ? '#FDF2F8' : '#FFFFFF');
-            doc.fillColor('#000000');
-            x = tableLeft;
-            [r.name || '-', r.phone || '-', fmtDate(r.anniversary_date)].forEach((v, i) => {
-                doc.text(v, x + 4, y + 8, { width: widths[i] - 8, ellipsis: true }); x += widths[i];
-            });
-            y += rowH;
-        });
-        doc.end();
+        const rows = await completeExportRows(results, false);
+        sendDetailsPdf(res, rows, false);
     } catch (err) {
         res.status(500).json({ error: 'Export failed' });
     }

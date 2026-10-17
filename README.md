@@ -22,6 +22,14 @@
 
 # DMS-DATABASE
 
+## Gift record lookup
+
+Gift create/update/import and list/by-phone reads use `gifts.phone` to link to
+the saved donor phone, including leading zeros. The list does not require a
+`gifts.donor_id` column. Cultivator reads are limited to gift phones belonging
+to their assigned donors using an existence check, so shared donor phones do
+not duplicate gifts.
+
 ## How to Start the database
 
 1. Install mysql database server(GUI) and connect using connection details.
